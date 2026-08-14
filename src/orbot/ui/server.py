@@ -132,9 +132,18 @@ def build_state() -> dict[str, Any]:
     return state
 
 
-def chart_payload(plan_name: str, bars: int = 240) -> dict[str, Any]:
+def chart_payload(plan_name: str, bars: int = 1500,
+                  overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     """Candles plus the indicator overlays, so the chart shows exactly what the
-    engine sees — the point being that you can put it beside TradingView."""
+    engine sees — the point being that you can put it beside TradingView.
+
+    Returns a deep window on purpose. Zooming and panning are then pure client
+    state with no round trip, which is the difference between a chart that feels
+    like a tool and one that feels like a report.
+
+    `overrides` recomputes with different strategy parameters without touching
+    config — the parameter playground.
+    """
     from ..broker.factory import build_broker
     from ..engine.history import fetch_candles
     from ..engine.strategy import SvmkrUtHmaOrb, params_from_config
@@ -157,9 +166,34 @@ def chart_payload(plan_name: str, bars: int = 240) -> dict[str, Any]:
     if not candles:
         return {"error": "no candles returned"}
 
+    if overrides:
+        merged = {**plan.strategy.params, **overrides}
+        params = params_from_config(merged)
+
     result = SvmkrUtHmaOrb(params, plan=plan.name).evaluate(candles)
     n = len(result.timestamps)
     start = max(0, n - bars)
+
+    # Slots the exchange should have printed but the broker did not send. Drawn
+    # on the chart because a gap silently moves the ATR chain, and a divergence
+    # you cannot see is one you will blame on the port.
+    gaps: list[str] = []
+    if tf.is_intraday:
+        by_day: dict[Any, list] = {}
+        for ts in result.timestamps[start:]:
+            by_day.setdefault(ts.date(), []).append(ts.time())
+        step = dt.timedelta(minutes=tf.minutes)
+        for day, times in by_day.items():
+            # Interior gaps only: walk from the first bar actually present to
+            # the last. Starting at 09:15 would flag the whole morning as
+            # missing whenever the window happens to begin mid-session.
+            have = set(times)
+            first, last = min(times), max(times)
+            cur = dt.datetime.combine(day, first)
+            while cur.time() < last:
+                cur += step
+                if cur.time() < last and cur.time() not in have:
+                    gaps.append(cur.replace(tzinfo=IST_TZ).isoformat())
 
     return {
         "plan": plan.name,
@@ -169,13 +203,19 @@ def chart_payload(plan_name: str, bars: int = 240) -> dict[str, Any]:
         "params": {
             "ut_key": params.ut_key, "ut_atr_period": params.ut_atr_period,
             "hma_length": params.hma_length, "orb_session": params.orb_session,
+            "use_heikin_ashi": params.use_heikin_ashi,
         },
+        "gaps": gaps,
+        "signal_count": sum(1 for i in range(start, n)
+                            if result.buy[i] or result.sell[i]),
+        "sessions": len({t.date() for t in result.timestamps[start:]}),
         "bars": [{
             "t": result.timestamps[i].isoformat(),
             "o": candles[i].open, "h": candles[i].high,
             "l": candles[i].low, "c": candles[i].close,
             "stop": result.ut.stop[i], "hma": result.hma[i],
             "orb_high": result.orb.high[i], "orb_low": result.orb.low[i],
+            "atr": result.ut.atr[i],
             "buy": bool(result.buy[i]), "sell": bool(result.sell[i]),
         } for i in range(start, n)],
     }
@@ -185,6 +225,7 @@ def create_app(*, allow_control: bool = True):
     try:
         from fastapi import FastAPI, HTTPException
         from fastapi.responses import HTMLResponse
+        from fastapi.staticfiles import StaticFiles
     except ImportError as exc:  # pragma: no cover - dependency guidance
         raise SystemExit(
             "the dashboard needs FastAPI — install with:\n"
@@ -192,6 +233,7 @@ def create_app(*, allow_control: bool = True):
         ) from exc
 
     app = FastAPI(title="ORBot", docs_url=None, redoc_url=None)
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -202,8 +244,16 @@ def create_app(*, allow_control: bool = True):
         return build_state()
 
     @app.get("/api/chart/{plan_name}")
-    def chart(plan_name: str, bars: int = 240) -> dict:
-        return chart_payload(plan_name, bars=bars)
+    def chart(plan_name: str, bars: int = 1500, ut_key: float | None = None,
+              ut_atr_period: int | None = None, hma_length: int | None = None,
+              orb_session: str | None = None,
+              use_heikin_ashi: bool | None = None) -> dict:
+        overrides = {k: v for k, v in {
+            "ut_key": ut_key, "ut_atr_period": ut_atr_period,
+            "hma_length": hma_length, "orb_session": orb_session,
+            "use_heikin_ashi": use_heikin_ashi,
+        }.items() if v is not None}
+        return chart_payload(plan_name, bars=bars, overrides=overrides or None)
 
     @app.post("/api/halt")
     def halt() -> dict:
