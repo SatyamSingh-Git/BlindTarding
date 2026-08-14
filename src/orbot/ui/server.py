@@ -30,6 +30,7 @@ from ..ops.market_calendar import MarketCalendar
 
 IST_TZ = ZoneInfo(IST)
 STATIC = Path(__file__).parent / "static"
+NEWLINE = chr(10)
 
 
 def _rows(conn: sqlite3.Connection, sql: str, args: tuple = ()) -> list[dict]:
@@ -156,7 +157,9 @@ def chart_payload(plan_name: str, bars: int = 1500,
 
     bundle = build_broker(settings, refresh_instruments=False)
     inst = bundle.registry.get(plan.signal.exchange_segment, plan.signal.security_id)
-    tf = Timeframe.parse(plan.signal.timeframe)
+    overrides = dict(overrides or {})
+    tf_spec = overrides.pop("timeframe", None)
+    tf = Timeframe.parse(tf_spec or plan.signal.timeframe)
     params = params_from_config(plan.strategy.params)
 
     end = dt.datetime.now()
@@ -167,8 +170,7 @@ def chart_payload(plan_name: str, bars: int = 1500,
         return {"error": "no candles returned"}
 
     if overrides:
-        merged = {**plan.strategy.params, **overrides}
-        params = params_from_config(merged)
+        params = params_from_config({**plan.strategy.params, **overrides})
 
     result = SvmkrUtHmaOrb(params, plan=plan.name).evaluate(candles)
     n = len(result.timestamps)
@@ -221,6 +223,84 @@ def chart_payload(plan_name: str, bars: int = 1500,
     }
 
 
+PARAM_KEYS = ("ut_key", "ut_atr_period", "hma_length", "orb_session",
+              "use_heikin_ashi", "require_hma_agreement", "require_orb_breakout")
+
+
+def configured_params(plan_name: str) -> dict[str, Any]:
+    from ..engine.strategy import params_from_config
+    plan = next((p for p in load_plans() if p.name == plan_name), None)
+    if plan is None:
+        return {}
+    p = params_from_config(plan.strategy.params)
+    return {
+        "ut_key": p.ut_key, "ut_atr_period": p.ut_atr_period,
+        "hma_length": p.hma_length, "orb_session": p.orb_session,
+        "use_heikin_ashi": p.use_heikin_ashi,
+        "timeframe": plan.signal.timeframe,
+    }
+
+
+def apply_params(changes: dict[str, Any], *, dry_run: bool = True) -> dict[str, Any]:
+    """Edit the strategy parameters in `config/instruments.yaml`.
+
+    Rewritten as targeted line edits rather than a YAML load-and-dump, because
+    a round trip through PyYAML would discard every comment in the file and
+    collapse the shared anchor the plans depend on.
+
+    Only the numeric and string values on known parameter lines are touched.
+    A `.bak` is written first, and if the result no longer parses the original
+    is restored — a config that decides what trades should not be left broken
+    by a slider.
+    """
+    path = CONFIG_DIR / "instruments.yaml"
+    if not path.exists():
+        return {"error": "config/instruments.yaml not found"}
+
+    original = path.read_text(encoding="utf-8")
+    lines = original.splitlines(keepends=True)
+    diff: list[dict[str, str]] = []
+    out: list[str] = []
+
+    for raw in lines:
+        replaced = raw
+        stripped = raw.split("#", 1)[0]
+        for key, value in changes.items():
+            if key not in PARAM_KEYS:
+                continue
+            marker = f"{key}:"
+            if stripped.strip().startswith(marker):
+                indent = raw[: len(raw) - len(raw.lstrip())]
+                comment = ""
+                if "#" in raw:
+                    tail = raw.split("#", 1)[1].strip()
+                    comment = "  # " + tail.lstrip("# ")
+                rendered = ('"%s"' % value if isinstance(value, str)
+                            else ("true" if value is True
+                                  else "false" if value is False else value))
+                new = f"{indent}{key}: {rendered}{comment}" + NEWLINE
+                old_val = stripped.split(":", 1)[1].strip()
+                if str(old_val) != str(rendered):
+                    diff.append({"key": key, "from": old_val, "to": str(rendered)})
+                    replaced = new
+                break
+        out.append(replaced)
+
+    if dry_run or not diff:
+        return {"diff": diff, "applied": False, "path": str(path)}
+
+    backup = path.with_suffix(".yaml.bak")
+    backup.write_text(original, encoding="utf-8")
+    path.write_text("".join(out), encoding="utf-8")
+    try:
+        load_plans()
+    except Exception as exc:
+        path.write_text(original, encoding="utf-8")
+        return {"error": f"change rejected, config restored: {exc}", "diff": diff,
+                "applied": False}
+    return {"diff": diff, "applied": True, "backup": str(backup)}
+
+
 def create_app(*, allow_control: bool = True):
     try:
         from fastapi import FastAPI, HTTPException
@@ -246,14 +326,25 @@ def create_app(*, allow_control: bool = True):
     @app.get("/api/chart/{plan_name}")
     def chart(plan_name: str, bars: int = 1500, ut_key: float | None = None,
               ut_atr_period: int | None = None, hma_length: int | None = None,
-              orb_session: str | None = None,
+              orb_session: str | None = None, timeframe: str | None = None,
               use_heikin_ashi: bool | None = None) -> dict:
         overrides = {k: v for k, v in {
             "ut_key": ut_key, "ut_atr_period": ut_atr_period,
             "hma_length": hma_length, "orb_session": orb_session,
-            "use_heikin_ashi": use_heikin_ashi,
+            "use_heikin_ashi": use_heikin_ashi, "timeframe": timeframe,
         }.items() if v is not None}
         return chart_payload(plan_name, bars=bars, overrides=overrides or None)
+
+    @app.get("/api/params/{plan_name}")
+    def params(plan_name: str) -> dict:
+        return configured_params(plan_name)
+
+    @app.post("/api/params")
+    def set_params(payload: dict) -> dict:
+        if not allow_control:
+            raise HTTPException(403, "controls disabled")
+        return apply_params(payload.get("params") or {},
+                            dry_run=bool(payload.get("dry_run", True)))
 
     @app.post("/api/halt")
     def halt() -> dict:

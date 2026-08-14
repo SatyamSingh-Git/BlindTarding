@@ -87,6 +87,22 @@
   canvas{display:block;width:100%;height:440px;touch-action:none}
   .hint{padding:6px 13px;font-size:11px;color:var(--faint);
         border-top:1px solid var(--line);display:flex;gap:16px;flex-wrap:wrap}
+  .lab{display:flex;flex-direction:column;gap:3px;min-width:94px}
+  .lab span{font-size:10px;color:var(--faint);text-transform:uppercase;
+            letter-spacing:.5px}
+  .lab input,.lab select{font:inherit;background:var(--bg);color:var(--text);
+       border:1px solid var(--line);border-radius:5px;padding:4px 7px;width:100%;
+       font-family:ui-monospace,Consolas,monospace}
+  .lab input.changed,.lab select.changed{border-color:var(--accent);
+       background:rgba(76,141,255,.1)}
+  .play{display:flex;gap:11px;flex-wrap:wrap;align-items:flex-end;
+        padding:11px 13px;border-bottom:1px solid var(--line)}
+  .delta{font-family:ui-monospace,Consolas,monospace;font-size:12px;
+         margin-left:auto}
+  details.pg{border-bottom:1px solid var(--line)}
+  details.pg > summary{padding:8px 13px;cursor:pointer;font-size:11px;
+       font-weight:650;letter-spacing:.7px;text-transform:uppercase;
+       color:var(--dim);user-select:none;background:var(--panel-2)}
   .banner{padding:9px 13px;font-size:12px;border-bottom:1px solid var(--line)}
   .banner.warn{background:rgba(227,160,8,.1);color:var(--warn)}
   .banner.err{background:rgba(229,72,77,.12);color:var(--down)}
@@ -130,6 +146,34 @@
         <label class="chk"><input type="checkbox" id="tSig" checked>Signals</label>
         <label class="chk"><input type="checkbox" id="tGap" checked>Data gaps</label>
       </div>
+
+      <details class="pg" id="pgWrap">
+        <summary>Parameter playground
+          <span style="font-weight:400;text-transform:none;letter-spacing:0;
+                       color:var(--faint)">— recompute without touching config</span>
+        </summary>
+        <div class="play">
+          <label class="lab"><span>UT key</span>
+            <input type="number" id="pUtKey" step="0.1" min="0.1" max="20"></label>
+          <label class="lab"><span>ATR period</span>
+            <input type="number" id="pAtr" step="1" min="1" max="100"></label>
+          <label class="lab"><span>Hull MA</span>
+            <input type="number" id="pHma" step="1" min="2" max="400"></label>
+          <label class="lab"><span>ORB session</span>
+            <input type="text" id="pOrb" placeholder="1010-1015"></label>
+          <label class="lab"><span>Timeframe</span>
+            <select id="pTf">
+              <option>5m</option><option>10m</option><option>15m</option>
+              <option>25m</option><option>30m</option><option>45m</option>
+              <option>1h</option><option>2h</option>
+            </select></label>
+          <label class="lab" style="min-width:auto"><span>Heikin Ashi</span>
+            <input type="checkbox" id="pHa" style="width:auto;margin-top:6px"></label>
+          <button id="pgReset">Reset</button>
+          <button id="pgApply">Apply to config…</button>
+          <div class="delta" id="pgDelta"></div>
+        </div>
+      </details>
 
       <div id="readout">
         <span class="muted">hover the chart for values</span>
@@ -291,17 +335,33 @@ async function refresh(){
   const pick = $("#planPick");
   if(pick.options.length !== s.plans.length){
     pick.innerHTML = s.plans.map(p=>`<option value="${p.name}">${p.name}</option>`).join("");
-    if(!currentPlan && s.plans.length){ currentPlan = s.plans[0].name; loadChart(); }
+    if(!currentPlan && s.plans.length){ currentPlan = s.plans[0].name;
+      pgLoad().then(function(){ loadChart(); }); }
   }
 }
 
-async function loadChart(){
+async function loadChart(withOverrides){
   if(!currentPlan) return;
   $("#chartNote").textContent = "loading…";
+  let qs = "bars=1500";
+  const dirty = withOverrides ? pgDirty() : {};
+  for(const [k,v] of Object.entries(dirty)) qs += `&${k}=${encodeURIComponent(v)}`;
   try{
-    const d = await (await fetch(`/api/chart/${currentPlan}?bars=1500`)).json();
+    const d = await (await fetch(`/api/chart/${currentPlan}?${qs}`)).json();
     if(d.error){ $("#chartNote").textContent = d.error; return; }
     chart.setData(d.bars, d.gaps);
+    const changed = Object.keys(dirty).length > 0;
+    if(!changed) baseCount = d.signal_count;
+    const el = $("#pgDelta");
+    if(changed && baseCount !== null){
+      const diff = d.signal_count - baseCount;
+      el.innerHTML = `<b>${d.signal_count}</b> signals <span class="` +
+        (diff>0?"pos":diff<0?"neg":"muted") + `">(` + (diff>0?"+":"") +
+        `${diff} vs ${baseCount} configured)</span>`;
+    } else {
+      el.innerHTML = `<span class="muted">${d.signal_count} signals at the ` +
+        `configured settings</span>`;
+    }
     $("#chartNote").textContent =
       `${d.instrument} · ${d.timeframe}${d.native?"":" · resampled"} · `
       + `${d.bars.length} bars · ${d.sessions} sessions · ${d.signal_count} signals`
@@ -309,7 +369,95 @@ async function loadChart(){
   }catch(e){ $("#chartNote").textContent = "chart unavailable"; }
 }
 
-$("#planPick").addEventListener("change", e=>{ currentPlan=e.target.value; loadChart(); });
+// --- parameter playground ------------------------------------------------
+let configured = null, baseCount = null, pgTimer = null;
+const PG = {ut_key:"#pUtKey", ut_atr_period:"#pAtr", hma_length:"#pHma",
+            orb_session:"#pOrb", timeframe:"#pTf", use_heikin_ashi:"#pHa"};
+
+function pgValues(){
+  return {
+    ut_key: parseFloat($(PG.ut_key).value),
+    ut_atr_period: parseInt($(PG.ut_atr_period).value, 10),
+    hma_length: parseInt($(PG.hma_length).value, 10),
+    orb_session: $(PG.orb_session).value.trim(),
+    timeframe: $(PG.timeframe).value,
+    use_heikin_ashi: $(PG.use_heikin_ashi).checked,
+  };
+}
+
+function pgDirty(){
+  if(!configured) return {};
+  const v = pgValues(), out = {};
+  for(const k of Object.keys(v)){
+    if(v[k] !== v[k]) continue;                       // NaN while typing
+    if(String(v[k]) !== String(configured[k])) out[k] = v[k];
+  }
+  return out;
+}
+
+function pgMark(){
+  const dirty = pgDirty();
+  Object.entries(PG).forEach(function(pair){
+    $(pair[1]).classList.toggle("changed", pair[0] in dirty);
+  });
+  return dirty;
+}
+
+async function pgLoad(){
+  if(!currentPlan) return;
+  configured = await (await fetch("/api/params/" + currentPlan)).json();
+  $(PG.ut_key).value = configured.ut_key;
+  $(PG.ut_atr_period).value = configured.ut_atr_period;
+  $(PG.hma_length).value = configured.hma_length;
+  $(PG.orb_session).value = configured.orb_session;
+  $(PG.timeframe).value = configured.timeframe;
+  $(PG.use_heikin_ashi).checked = !!configured.use_heikin_ashi;
+  pgMark();
+}
+
+function pgQueue(){
+  clearTimeout(pgTimer);
+  pgMark();
+  pgTimer = setTimeout(function(){ loadChart(true); }, 400);
+}
+
+Object.values(PG).forEach(function(sel){
+  $(sel).addEventListener("input", pgQueue);
+  $(sel).addEventListener("change", pgQueue);
+});
+
+$("#pgReset").addEventListener("click", async function(){
+  await pgLoad(); loadChart();
+});
+
+$("#pgApply").addEventListener("click", async function(){
+  const dirty = pgDirty();
+  delete dirty.timeframe;        // timeframe lives on the plan, not on params
+  if(!Object.keys(dirty).length){ alert("Nothing changed."); return; }
+  const prev = await (await fetch("/api/params", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({params: dirty, dry_run: true})})).json();
+  if(prev.error){ alert(prev.error); return; }
+  if(!prev.diff.length){ alert("Nothing to change."); return; }
+  const lines = prev.diff.map(function(d){
+    return "  " + d.key + ": " + d.from + " -> " + d.to; }).join("\n");
+  const msg = "Write these to config/instruments.yaml?" + "\n" + "\n" + lines +
+    "\n" + "\n" + "A .bak is kept and the change is rolled back if the file " +
+    "no longer parses." + "\n" + "\n" + "These parameters decide what gets " +
+    "traded - re-run the validation gate against TradingView afterwards.";
+  if(!confirm(msg)) return;
+  const res = await (await fetch("/api/params", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({params: dirty, dry_run: false})})).json();
+  if(res.error){ alert(res.error); return; }
+  alert("Applied. Backup kept at " + (res.backup || "-"));
+  await pgLoad(); loadChart();
+});
+
+$("#planPick").addEventListener("change", function(e){
+  currentPlan = e.target.value; baseCount = null;
+  pgLoad().then(function(){ loadChart(); });
+});
 $("#zoomIn").addEventListener("click", ()=>chart.zoomBy(1/1.4));
 $("#zoomOut").addEventListener("click", ()=>chart.zoomBy(1.4));
 $("#resetView").addEventListener("click", ()=>chart.resetView());
@@ -330,7 +478,7 @@ window.addEventListener("keydown", e=>{
 });
 
 refresh(); setInterval(refresh, 3000);
-setInterval(loadChart, 60000);
+setInterval(function(){ loadChart(true); }, 60000);
 </script>
 </body>
 </html>
