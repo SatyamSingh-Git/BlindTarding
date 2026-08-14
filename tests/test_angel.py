@@ -514,3 +514,46 @@ class TestHostileTimestamps:
                                    ts_ms=int(stamp.timestamp() * 1000)),
                             segment_lookup=nfo)
         assert ticks[0].ts.hour == 9 and ticks[0].ts.minute == 15
+
+
+class TestNseBseClassification:
+    """Verified against the real scrip master: every index on both exchanges
+    carries instrumenttype AMXIDX. Anything else with a blank type is cash.
+
+    The earlier rule treated "blank type and no -EQ suffix" as an index, which
+    made every BSE equity an index — BSE cash carries no -EQ suffix.
+    """
+
+    def test_nse_index_is_an_index(self):
+        inst = parse_row({"token": "99926000", "symbol": "Nifty 50",
+                          "name": "NIFTY", "instrumenttype": "AMXIDX",
+                          "exch_seg": "NSE", "strike": "-1", "lotsize": "1"})
+        assert inst.segment is ExchangeSegment.IDX_I
+        assert inst.instrument_type is InstrumentType.INDEX
+
+    def test_bse_index_is_an_index(self):
+        inst = parse_row({"token": "99919000", "symbol": "SENSEX",
+                          "name": "SENSEX", "instrumenttype": "AMXIDX",
+                          "exch_seg": "BSE", "strike": "-1", "lotsize": "1"})
+        assert inst.segment is ExchangeSegment.IDX_I
+
+    def test_bse_equity_is_equity_not_index(self):
+        """The bug this guards: BSE cash has no -EQ suffix."""
+        inst = parse_row({"token": "500325", "symbol": "RELIANCE",
+                          "name": "RELIANCE", "instrumenttype": "",
+                          "exch_seg": "BSE", "strike": "-1", "lotsize": "1"})
+        assert inst.segment is ExchangeSegment.BSE_EQ
+        assert inst.instrument_type is InstrumentType.EQUITY
+
+    def test_nse_equity_needs_the_eq_suffix(self):
+        inst = parse_row({"token": "2885", "symbol": "RELIANCE-EQ",
+                          "name": "RELIANCE", "instrumenttype": "",
+                          "exch_seg": "NSE", "strike": "-1", "lotsize": "1"})
+        assert inst.segment is ExchangeSegment.NSE_EQ
+
+    def test_ambiguous_nse_row_is_dropped_not_guessed(self):
+        """An NSE row with no type and no -EQ suffix is neither cleanly.
+        Guessing wrong means a plan configured against something untradeable."""
+        assert parse_row({"token": "26000", "symbol": "NIFTY", "name": "NIFTY",
+                          "instrumenttype": "", "exch_seg": "NSE",
+                          "strike": "-1", "lotsize": "1"}) is None

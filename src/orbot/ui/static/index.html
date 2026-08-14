@@ -125,6 +125,13 @@
   .toast.warn{border-left-color:var(--warn)}
   .caveat{padding:8px 13px;font-size:11.5px;color:var(--warn);
           background:rgba(227,160,8,.08);border-bottom:1px solid var(--line)}
+  .results{max-height:190px;overflow:auto;border:1px solid var(--line);
+           border-radius:6px;margin-top:6px}
+  .results div{padding:6px 10px;cursor:pointer;font-size:12px;
+               border-bottom:1px solid rgba(36,48,64,.5)}
+  .results div:hover{background:var(--panel-2)}
+  .results div:last-child{border-bottom:none}
+  .fresh{font-size:11px;color:var(--faint)}
   .banner{padding:9px 13px;font-size:12px;border-bottom:1px solid var(--line)}
   .banner.warn{background:rgba(227,160,8,.1);color:var(--warn)}
   .banner.err{background:rgba(229,72,77,.12);color:var(--down)}
@@ -170,6 +177,53 @@
         <label class="chk"><input type="checkbox" id="tGap" checked>Data gaps</label>
       </div>
 
+      <details class="pg" id="edWrap">
+        <summary>What to trade
+          <span style="font-weight:400;text-transform:none;letter-spacing:0;
+                       color:var(--faint)">— instrument, timeframe, execution</span>
+        </summary>
+        <div class="play">
+          <label class="lab" style="min-width:230px"><span>Signal instrument</span>
+            <input type="text" id="edSearch" placeholder="type NIFTY, BANKNIFTY, RELIANCE…">
+          </label>
+          <label class="lab"><span>Timeframe</span>
+            <select id="edTf">
+              <option>5m</option><option>10m</option><option>15m</option>
+              <option>25m</option><option>30m</option><option>45m</option>
+              <option>1h</option><option>2h</option>
+            </select></label>
+          <label class="lab"><span>Execute as</span>
+            <select id="edMode">
+              <option value="option">option</option>
+              <option value="future">future</option>
+              <option value="same">same instrument</option>
+            </select></label>
+          <label class="lab"><span>Option type</span>
+            <select id="edOpt"><option>CE</option><option>PE</option></select></label>
+          <label class="lab"><span>Strike</span>
+            <select id="edStrike">
+              <option>ATM</option><option>ITM1</option><option>ITM2</option>
+              <option>OTM1</option><option>OTM2</option>
+            </select></label>
+          <label class="lab"><span>Expiry</span>
+            <select id="edExpiry">
+              <option value="nearest">nearest</option>
+              <option value="next">next</option>
+              <option value="nearest_monthly">monthly</option>
+            </select></label>
+          <label class="lab"><span>Lots</span>
+            <input type="number" id="edLots" min="1" step="1"></label>
+          <label class="lab"><span>Square off</span>
+            <input type="text" id="edSq" placeholder="15:10"></label>
+          <label class="lab"><span>Max trades/day</span>
+            <input type="number" id="edMax" min="0" step="1"></label>
+          <button id="edSave">Save plan…</button>
+          <div class="delta" id="edNote"></div>
+        </div>
+        <div style="padding:0 13px 11px"><div class="results" id="edResults"
+             style="display:none"></div></div>
+      </details>
+
       <details class="pg" id="pgWrap">
         <summary>Parameter playground
           <span style="font-weight:400;text-transform:none;letter-spacing:0;
@@ -208,6 +262,7 @@
         <span>scroll = zoom</span><span>drag = pan</span>
         <span>shift-drag = measure</span><span>double-click = reset</span>
         <span id="measureOut" class="mono"></span>
+        <span class="fresh" id="chartFresh" style="margin-left:auto"></span>
       </div>
     </div>
 
@@ -310,6 +365,7 @@ async function refresh(){
   $("#broker").textContent = s.broker;
   $("#market").textContent = s.market_open ? "open" : "closed";
   $("#market").className = s.market_open ? "pos" : "muted";
+  marketOpen = s.market_open;
   $("#trades").textContent = s.trades_today;
   $("#posCount").textContent = s.positions.length;
   $("#clock").textContent = hhmm(s.now);
@@ -382,7 +438,7 @@ async function refresh(){
   if(pick.options.length !== s.plans.length){
     pick.innerHTML = s.plans.map(p=>`<option value="${p.name}">${p.name}</option>`).join("");
     if(!currentPlan && s.plans.length){ currentPlan = s.plans[0].name;
-      pgLoad().then(function(){ loadChart(); loadPerf(false); }); }
+      pgLoad().then(function(){ edLoad(); loadChart(); loadPerf(false); }); }
   }
 }
 
@@ -408,6 +464,7 @@ async function loadChart(withOverrides){
       el.innerHTML = `<span class="muted">${d.signal_count} signals at the ` +
         `configured settings</span>`;
     }
+    lastChartAt = Date.now();
     $("#chartNote").textContent =
       `${d.instrument} · ${d.timeframe}${d.native?"":" · resampled"} · `
       + `${d.bars.length} bars · ${d.sessions} sessions · ${d.signal_count} signals`
@@ -415,6 +472,90 @@ async function loadChart(withOverrides){
   }catch(e){ $("#chartNote").textContent = "chart unavailable"; }
 }
 
+
+
+// --- what to trade -------------------------------------------------------
+let edPick = null, edTimer = null;
+
+async function edLoad(){
+  if(!configured) return;
+  $("#edTf").value = configured.timeframe;
+  $("#edMode").value = configured.mode || "option";
+  if(configured.option_type) $("#edOpt").value = configured.option_type;
+  if(configured.strike) $("#edStrike").value = configured.strike;
+  if(configured.expiry) $("#edExpiry").value = configured.expiry;
+  $("#edLots").value = configured.qty_lots || 1;
+  $("#edSq").value = configured.square_off_time || "15:10";
+  $("#edMax").value = configured.max_trades_per_day || 0;
+  $("#edSearch").placeholder = (perf && perf.instrument)
+    ? perf.instrument + "  (change to search)" : "type NIFTY, BANKNIFTY…";
+  edPick = null;
+}
+
+$("#edSearch").addEventListener("input", function(e){
+  clearTimeout(edTimer);
+  const q = e.target.value.trim();
+  const box = $("#edResults");
+  if(q.length < 2){ box.style.display = "none"; return; }
+  edTimer = setTimeout(async function(){
+    const rows = await (await fetch("/api/instruments?q=" +
+      encodeURIComponent(q) + "&limit=20")).json();
+    if(!rows.length){ box.style.display="none"; return; }
+    box.innerHTML = rows.map(function(r){
+      return `<div data-id="${r.security_id}" data-seg="${r.segment}" ` +
+        `data-type="${r.instrument_type}" data-sym="${r.symbol}">` +
+        `<b>${r.display_name}</b> <span class="pill">${r.instrument_type}</span> ` +
+        `<span class="muted">${r.segment} · id ${r.security_id}` +
+        (r.lot_size > 1 ? " · lot " + r.lot_size : "") + `</span></div>`;
+    }).join("");
+    box.style.display = "";
+    box.querySelectorAll("div").forEach(function(el){
+      el.addEventListener("click", function(){
+        edPick = {security_id: el.dataset.id, exchange_segment: el.dataset.seg,
+                  instrument_type: el.dataset.type, symbol: el.dataset.sym};
+        $("#edSearch").value = el.querySelector("b").textContent;
+        box.style.display = "none";
+        $("#edNote").innerHTML = `<span class="pos">selected ` +
+          `${edPick.symbol} (${edPick.instrument_type})</span>`;
+      });
+    });
+  }, 300);
+});
+
+$("#edSave").addEventListener("click", async function(){
+  const changes = {
+    timeframe: $("#edTf").value,
+    mode: $("#edMode").value,
+    qty_lots: parseInt($("#edLots").value, 10),
+    square_off_time: $("#edSq").value.trim(),
+    max_trades_per_day: parseInt($("#edMax").value, 10),
+    option_type: $("#edOpt").value,
+    strike: $("#edStrike").value,
+    expiry: $("#edExpiry").value,
+  };
+  if(edPick){
+    changes.security_id = edPick.security_id;
+    changes.exchange_segment = edPick.exchange_segment;
+    changes.instrument_type = edPick.instrument_type;
+    changes.underlying = edPick.symbol;
+  }
+  const prev = await (await fetch("/api/plan/" + currentPlan, {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({changes: changes, dry_run: true})})).json();
+  if(prev.error){ alert(prev.error); return; }
+  if(!prev.diff.length){ alert("Nothing changed."); return; }
+  const lines = prev.diff.map(function(d){
+    return "  " + d.key + ": " + d.from + " -> " + d.to; }).join("\n");
+  if(!confirm("Update plan \"" + currentPlan + "\"?" + "\n" + "\n" + lines +
+      "\n" + "\n" + "Changing the instrument or timeframe invalidates the " +
+      "validation gate - re-run it against TradingView before trading this.")) return;
+  const res = await (await fetch("/api/plan/" + currentPlan, {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({changes: changes, dry_run: false})})).json();
+  if(res.error){ alert(res.error); return; }
+  toast("plan updated - re-run the validation gate", "warn");
+  await pgLoad(); await edLoad(); loadChart(); loadPerf(false);
+});
 
 // --- health strip --------------------------------------------------------
 async function loadHealth(){
@@ -673,7 +814,7 @@ $("#pgApply").addEventListener("click", async function(){
 
 $("#planPick").addEventListener("change", function(e){
   currentPlan = e.target.value; baseCount = null;
-  pgLoad().then(function(){ loadChart(); loadPerf(false); });
+  pgLoad().then(function(){ edLoad(); loadChart(); loadPerf(false); });
 });
 $("#zoomIn").addEventListener("click", ()=>chart.zoomBy(1/1.4));
 $("#zoomOut").addEventListener("click", ()=>chart.zoomBy(1.4));
@@ -697,7 +838,23 @@ window.addEventListener("keydown", e=>{
 refresh(); loadHealth();
 setInterval(refresh, 2500);
 setInterval(loadHealth, 10000);
-setInterval(function(){ loadChart(true); }, 60000);
+let lastChartAt = 0, marketOpen = false;
+function tickFreshness(){
+  const el = $("#chartFresh");
+  if(!lastChartAt){ el.textContent = ""; return; }
+  const age = Math.round((Date.now() - lastChartAt) / 1000);
+  el.textContent = "chart updated " + (age < 60 ? age + "s" :
+    Math.round(age/60) + "m") + " ago" + (marketOpen ? " · refreshing every 30s"
+    : " · market closed");
+}
+setInterval(tickFreshness, 1000);
+// 30s while the market is open; every 5 minutes when it is not, because
+// refetching a closed market's history achieves nothing but load.
+setInterval(function(){
+  if(marketOpen || Date.now() - lastChartAt > 300000){
+    loadChart(true); loadPerf(false);
+  }
+}, 30000);
 </script>
 </body>
 </html>

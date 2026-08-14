@@ -122,13 +122,21 @@ def _classify(row: dict) -> tuple[ExchangeSegment, InstrumentType] | None:
         return _SEGMENT_FOR_EXCHANGE[exchange], InstrumentType(raw_type)
 
     if exchange in ("NSE", "BSE"):
-        # Cash rows are marked by an -EQ suffix; indices carry an index marker
-        # or simply no type at all.
-        if raw_type in _INDEX_MARKERS or (not raw_type and not symbol.endswith("-EQ")):
+        # Verified against the file: every index carries instrumenttype AMXIDX,
+        # on both exchanges. Everything else with a blank type is cash.
+        if raw_type in _INDEX_MARKERS:
             return ExchangeSegment.IDX_I, InstrumentType.INDEX
-        segment = (ExchangeSegment.NSE_EQ if exchange == "NSE"
-                   else ExchangeSegment.BSE_EQ)
-        return segment, InstrumentType.EQUITY
+        if raw_type:
+            return None                       # a type we do not trade
+        if exchange == "BSE":
+            # BSE cash carries no -EQ suffix, so blank type is the only marker.
+            return ExchangeSegment.BSE_EQ, InstrumentType.EQUITY
+        if symbol.endswith("-EQ"):
+            return ExchangeSegment.NSE_EQ, InstrumentType.EQUITY
+        # An NSE row with no type and no -EQ suffix is neither cleanly: dropping
+        # it beats guessing, since guessing wrong here means a plan configured
+        # against something that cannot be traded.
+        return None
     return None
 
 

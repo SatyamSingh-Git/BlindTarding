@@ -15,6 +15,7 @@ dependencies = [
     "pandas>=2.2",
     "numpy>=1.26",
     "pyotp>=2.9",
+    "ruamel.yaml>=0.18",
 ]
 
 [project.optional-dependencies]

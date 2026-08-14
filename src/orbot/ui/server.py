@@ -282,127 +282,212 @@ PARAM_KEYS = ("ut_key", "ut_atr_period", "hma_length", "orb_session",
               "use_heikin_ashi", "require_hma_agreement", "require_orb_breakout")
 
 
-def configured_params(plan_name: str) -> dict[str, Any]:
-    from ..engine.strategy import params_from_config
-    plan = next((p for p in load_plans() if p.name == plan_name), None)
-    if plan is None:
-        return {}
-    p = params_from_config(plan.strategy.params)
-    return {
-        "ut_key": p.ut_key, "ut_atr_period": p.ut_atr_period,
-        "hma_length": p.hma_length, "orb_session": p.orb_session,
-        "use_heikin_ashi": p.use_heikin_ashi,
-        "timeframe": plan.signal.timeframe,
-    }
+
+# --- config editing -------------------------------------------------------
+# ruamel round-trips YAML with comments, anchors and formatting intact. A
+# PyYAML load-and-dump would strip every comment in instruments.yaml and
+# collapse the shared &svmkr_params anchor the plans depend on.
+def _yaml():
+    from ruamel.yaml import YAML
+    y = YAML()
+    y.preserve_quotes = True
+    y.indent(mapping=2, sequence=4, offset=2)
+    return y
 
 
-def apply_params(changes: dict[str, Any], *, dry_run: bool = True) -> dict[str, Any]:
-    """Edit the strategy parameters in `config/instruments.yaml`.
+def _config_path():
+    return CONFIG_DIR / "instruments.yaml"
 
-    Rewritten as targeted line edits rather than a YAML load-and-dump, because
-    a round trip through PyYAML would discard every comment in the file and
-    collapse the shared anchor the plans depend on.
 
-    Only the numeric and string values on known parameter lines are touched.
-    A `.bak` is written first, and if the result no longer parses the original
-    is restored — a config that decides what trades should not be left broken
-    by a slider.
-    """
-    path = CONFIG_DIR / "instruments.yaml"
-    if not path.exists():
-        return {"error": "config/instruments.yaml not found"}
+def _load_doc():
+    path = _config_path()
+    with path.open("r", encoding="utf-8") as fh:
+        return _yaml().load(fh), path
 
+
+def _write_doc(doc, path) -> dict[str, Any]:
+    """Write, then prove the result still loads. A config that decides what
+    trades must never be left broken by a UI action."""
     original = path.read_text(encoding="utf-8")
-    lines = original.splitlines(keepends=True)
-    diff: list[dict[str, str]] = []
-    out: list[str] = []
-
-    for raw in lines:
-        replaced = raw
-        stripped = raw.split("#", 1)[0]
-        for key, value in changes.items():
-            if key not in PARAM_KEYS:
-                continue
-            marker = f"{key}:"
-            if stripped.strip().startswith(marker):
-                indent = raw[: len(raw) - len(raw.lstrip())]
-                comment = ""
-                if "#" in raw:
-                    tail = raw.split("#", 1)[1].strip()
-                    comment = "  # " + tail.lstrip("# ")
-                rendered = ('"%s"' % value if isinstance(value, str)
-                            else ("true" if value is True
-                                  else "false" if value is False else value))
-                new = f"{indent}{key}: {rendered}{comment}" + NEWLINE
-                old_val = stripped.split(":", 1)[1].strip()
-                if str(old_val) != str(rendered):
-                    diff.append({"key": key, "from": old_val, "to": str(rendered)})
-                    replaced = new
-                break
-        out.append(replaced)
-
-    if dry_run or not diff:
-        return {"diff": diff, "applied": False, "path": str(path)}
-
     backup = path.with_suffix(".yaml.bak")
     backup.write_text(original, encoding="utf-8")
-    path.write_text("".join(out), encoding="utf-8")
-    try:
-        load_plans()
-    except Exception as exc:
-        path.write_text(original, encoding="utf-8")
-        return {"error": f"change rejected, config restored: {exc}", "diff": diff,
-                "applied": False}
-    return {"diff": diff, "applied": True, "backup": str(backup)}
-
-
-def set_plan_enabled(plan_name: str, enabled: bool, *,
-                     dry_run: bool = True) -> dict[str, Any]:
-    """Flip `enabled` on one plan in instruments.yaml.
-
-    Same surgical approach as apply_params, and for the same reason: a YAML
-    round trip would strip the comments. Only the `enabled:` line that follows
-    the matching `- name:` is touched, so no other plan can be altered by a
-    mistargeted edit.
-    """
-    path = CONFIG_DIR / "instruments.yaml"
-    if not path.exists():
-        return {"error": "config/instruments.yaml not found"}
-    original = path.read_text(encoding="utf-8")
-    lines = original.splitlines(keepends=True)
-
-    out, found, armed = [], False, False
-    for raw in lines:
-        stripped = raw.split("#", 1)[0].strip()
-        if stripped.startswith("- name:"):
-            armed = stripped.split(":", 1)[1].strip().strip("\"'") == plan_name
-        elif armed and stripped.startswith("enabled:"):
-            current = stripped.split(":", 1)[1].strip()
-            want = "true" if enabled else "false"
-            if current != want:
-                indent = raw[: len(raw) - len(raw.lstrip())]
-                raw = f"{indent}enabled: {want}" + NEWLINE
-                found = True
-            armed = False
-        out.append(raw)
-
-    if not found:
-        return {"changed": False, "enabled": enabled,
-                "detail": f"{plan_name} already {'enabled' if enabled else 'disabled'}"}
-    if dry_run:
-        return {"changed": True, "enabled": enabled, "applied": False}
-
-    backup = path.with_suffix(".yaml.bak")
-    backup.write_text(original, encoding="utf-8")
-    path.write_text("".join(out), encoding="utf-8")
+    import io
+    buf = io.StringIO()
+    _yaml().dump(doc, buf)
+    path.write_text(buf.getvalue(), encoding="utf-8")
     try:
         load_plans()
     except Exception as exc:
         path.write_text(original, encoding="utf-8")
         return {"error": f"change rejected, config restored: {exc}"}
-    return {"changed": True, "enabled": enabled, "applied": True,
-            "backup": str(backup)}
+    return {"applied": True, "backup": str(backup)}
 
+
+def _find_plan_node(doc, plan_name):
+    for node in doc.get("plans", []):
+        if node.get("name") == plan_name:
+            return node
+    return None
+
+
+def search_instruments(query: str, limit: int = 25) -> list[dict[str, Any]]:
+    """Find something to trade by name.
+
+    Only instruments a signal can actually be computed on are returned —
+    indices, cash equity and futures. Options are excluded on purpose: the
+    strategy watches an underlying and the resolver picks the contract, so
+    offering a specific strike here would invite configuring a plan that
+    expires next week.
+    """
+    from ..broker.factory import build_broker
+    from ..constants import InstrumentType
+
+    q = (query or "").strip().upper()
+    if len(q) < 2:
+        return []
+    settings = get_settings()
+    registry = build_broker(settings, refresh_instruments=False).registry
+    wanted = {InstrumentType.INDEX, InstrumentType.EQUITY,
+              InstrumentType.FUTIDX, InstrumentType.FUTSTK}
+
+    out: list[dict[str, Any]] = []
+    for inst in registry._by_key.values():
+        if inst.instrument_type not in wanted:
+            continue
+        hay = f"{inst.symbol} {inst.display_name}".upper()
+        if q not in hay:
+            continue
+        out.append({
+            "security_id": inst.security_id,
+            "segment": inst.segment.value,
+            "instrument_type": inst.instrument_type.value,
+            "symbol": inst.symbol,
+            "display_name": inst.display_name,
+            "lot_size": inst.lot_size,
+            "expiry": inst.expiry.isoformat() if inst.expiry else None,
+            "exact": hay.startswith(q),
+        })
+        if len(out) > 400:
+            break
+    out.sort(key=lambda r: (not r["exact"], len(r["symbol"]), r["symbol"]))
+    return out[:limit]
+
+
+PLAN_FIELDS = {
+    "timeframe": ("signal", "timeframe"),
+    "security_id": ("signal", "security_id"),
+    "exchange_segment": ("signal", "exchange_segment"),
+    "instrument_type": ("signal", "instrument_type"),
+    "mode": ("execution", "mode"),
+    "underlying": ("execution", "underlying"),
+    "product": ("execution", "product"),
+    "order_type": ("execution", "order_type"),
+    "qty_lots": ("execution", "qty_lots"),
+    "quantity": ("execution", "quantity"),
+    "square_off_time": ("risk", "square_off_time"),
+    "max_trades_per_day": ("risk", "max_trades_per_day"),
+    "sl_pct": ("risk", "sl_pct"),
+    "target_pct": ("risk", "target_pct"),
+}
+LEG_FIELDS = {"option_type", "strike", "expiry"}
+
+
+def update_plan(plan_name: str, changes: dict[str, Any], *,
+                dry_run: bool = True) -> dict[str, Any]:
+    """Edit one plan's instrument, timeframe, execution and risk settings."""
+    from ..engine.timeframe import Timeframe, TimeframeError
+
+    doc, path = _load_doc()
+    node = _find_plan_node(doc, plan_name)
+    if node is None:
+        return {"error": f"no plan named {plan_name!r}"}
+
+    if "timeframe" in changes:
+        try:
+            changes["timeframe"] = Timeframe.parse(changes["timeframe"]).label
+        except TimeframeError as exc:
+            return {"error": str(exc)}
+
+    diff: list[dict[str, str]] = []
+    for key, value in changes.items():
+        if key in LEG_FIELDS:
+            leg = node.setdefault("execution", {}).setdefault("on_buy", {})
+            before = leg.get(key)
+            if str(before) != str(value):
+                diff.append({"key": f"on_buy.{key}", "from": str(before),
+                             "to": str(value)})
+                if not dry_run:
+                    leg[key] = value
+            continue
+        if key not in PLAN_FIELDS:
+            continue
+        section, field = PLAN_FIELDS[key]
+        block = node.setdefault(section, {})
+        before = block.get(field)
+        if str(before) == str(value):
+            continue
+        diff.append({"key": f"{section}.{field}", "from": str(before),
+                     "to": str(value)})
+        if not dry_run:
+            block[field] = value
+
+    if dry_run or not diff:
+        return {"diff": diff, "applied": False}
+    result = _write_doc(doc, path)
+    result["diff"] = diff
+    return result
+
+
+def apply_params(changes: dict[str, Any], *, dry_run: bool = True) -> dict[str, Any]:
+    """Edit strategy parameters.
+
+    The plans share one `&svmkr_params` anchor, so a change here applies to
+    every plan that references it. That is surfaced in the returned payload
+    rather than left as a surprise.
+    """
+    doc, path = _load_doc()
+    target = doc.get("defaults")
+    shared = target is not None
+    if target is None:
+        node = doc.get("plans", [{}])[0]
+        target = node.get("strategy", {}).get("params", {})
+
+    diff: list[dict[str, str]] = []
+    for key, value in changes.items():
+        if key not in PARAM_KEYS:
+            continue
+        before = target.get(key)
+        if str(before) == str(value):
+            continue
+        diff.append({"key": key, "from": str(before), "to": str(value)})
+        if not dry_run:
+            target[key] = value
+
+    if dry_run or not diff:
+        return {"diff": diff, "applied": False, "shared": shared,
+                "affects": [p.name for p in load_plans()] if shared else []}
+    result = _write_doc(doc, path)
+    result["diff"] = diff
+    result["shared"] = shared
+    return result
+
+
+def set_plan_enabled(plan_name: str, enabled: bool, *,
+                     dry_run: bool = True) -> dict[str, Any]:
+    doc, path = _load_doc()
+    node = _find_plan_node(doc, plan_name)
+    if node is None:
+        return {"error": f"no plan named {plan_name!r}"}
+    if bool(node.get("enabled")) == enabled:
+        return {"changed": False, "enabled": enabled,
+                "detail": f"{plan_name} already "
+                          f"{'enabled' if enabled else 'disabled'}"}
+    if dry_run:
+        return {"changed": True, "enabled": enabled, "applied": False}
+    node["enabled"] = enabled
+    result = _write_doc(doc, path)
+    result.update({"changed": True, "enabled": enabled})
+    return result
 
 def create_app(*, allow_control: bool = True):
     try:
@@ -448,6 +533,17 @@ def create_app(*, allow_control: bool = True):
             raise HTTPException(403, "controls disabled")
         return apply_params(payload.get("params") or {},
                             dry_run=bool(payload.get("dry_run", True)))
+
+    @app.get("/api/instruments")
+    def instruments(q: str = "", limit: int = 25) -> list:
+        return search_instruments(q, limit=limit)
+
+    @app.post("/api/plan/{plan_name}")
+    def edit_plan(plan_name: str, payload: dict) -> dict:
+        if not allow_control:
+            raise HTTPException(403, "controls disabled")
+        return update_plan(plan_name, payload.get("changes") or {},
+                           dry_run=bool(payload.get("dry_run", True)))
 
     @app.get("/api/health")
     def health_endpoint() -> dict:

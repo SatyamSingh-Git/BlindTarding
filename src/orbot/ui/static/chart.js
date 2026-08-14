@@ -38,6 +38,10 @@
     this.bars = [];
     this.gaps = new Set();
     this.view = { end: 0, count: 180 };   // end is exclusive
+    // null means fit-to-data. Once you drag vertically or scale the price
+    // axis it becomes a locked window, because auto-fit would silently undo
+    // the adjustment on the next redraw.
+    this.priceRange = null;
     this.cursor = null;                   // index under the pointer
     this.drag = null;
     this.measure = null;                  // {a, b} bar indices
@@ -75,7 +79,24 @@
   Chart.prototype.resetView = function () {
     this.view.end = this.bars.length;
     this.view.count = Math.min(180, Math.max(MIN_BARS, this.bars.length));
+    this.priceRange = null;
     this.measure = null; this.onMeasure(null);
+    this.draw();
+  };
+
+  Chart.prototype.autoPrice = function () {
+    this.priceRange = null;
+    this.draw();
+  };
+
+  Chart.prototype.scalePrice = function (factor, anchorPrice) {
+    const m = this._geom();
+    const lo = this.priceRange ? this.priceRange.lo : m.lo;
+    const hi = this.priceRange ? this.priceRange.hi : m.hi;
+    const mid = anchorPrice === undefined ? (lo + hi) / 2 : anchorPrice;
+    const span = (hi - lo) * factor;
+    const frac = (hi - lo) ? (mid - lo) / (hi - lo) : 0.5;
+    this.priceRange = { lo: mid - span * frac, hi: mid + span * (1 - frac) };
     this.draw();
   };
 
@@ -116,6 +137,7 @@
     }
     if (!isFinite(lo)) { lo = 0; hi = 1; }
     const pad = (hi - lo) * 0.07 || 1; lo -= pad; hi += pad;
+    if (this.priceRange) { lo = this.priceRange.lo; hi = this.priceRange.hi; }
 
     return {
       W, H, from, to, slice, step, plotW, plotH, lo, hi,
@@ -123,6 +145,8 @@
       y: p => PAD.t + (hi - p) / (hi - lo) * plotH,
       idxAt: px => Math.round(from + (px - PAD.l) / step - 0.5),
       priceAt: py => hi - (py - PAD.t) / plotH * (hi - lo),
+      onPriceAxis: px => px > W - PAD.r,
+      onTimeAxis: py => py > H - PAD.b,
     };
   };
 
@@ -334,26 +358,54 @@
   Chart.prototype._bind = function () {
     const cv = this.canvas, self = this;
 
+    function zone(m, pos) {
+      if (m.onPriceAxis(pos.x)) return "price";
+      if (m.onTimeAxis(pos.y)) return "time";
+      return "plot";
+    }
+
     cv.addEventListener("wheel", e => {
       e.preventDefault();
-      const m = self._geom();
-      self.zoomBy(e.deltaY > 0 ? 1.18 : 1 / 1.18, m.idxAt(self._px(e).x));
+      const m = self._geom(), pos = self._px(e), where = zone(m, pos);
+      const factor = e.deltaY > 0 ? 1.18 : 1 / 1.18;
+      // Over the price axis the wheel scales price only; elsewhere it scales
+      // time. Matches how every charting tool behaves, and means you can
+      // stretch one axis without disturbing the other.
+      if (where === "price") self.scalePrice(factor, m.priceAt(pos.y));
+      else self.zoomBy(factor, m.idxAt(pos.x));
     }, { passive: false });
 
     cv.addEventListener("mousedown", e => {
-      const m = self._geom(), pos = self._px(e), i = m.idxAt(pos.x);
+      const m = self._geom(), pos = self._px(e), where = zone(m, pos);
+      const i = m.idxAt(pos.x);
+
+      if (where === "price") {
+        self.drag = { kind: "scaleY", y: pos.y,
+                      lo: (self.priceRange || m).lo, hi: (self.priceRange || m).hi,
+                      anchor: m.priceAt(pos.y), plotH: m.plotH };
+        cv.style.cursor = "ns-resize";
+        return;
+      }
+      if (where === "time") {
+        self.drag = { kind: "scaleX", x: pos.x, count: self.view.count,
+                      end: self.view.end };
+        cv.style.cursor = "ew-resize";
+        return;
+      }
       if (self.measureMode || e.shiftKey) {
         self.measure = { a: i, b: i, p1: m.priceAt(pos.y), p2: m.priceAt(pos.y) };
         self.drag = { kind: "measure" };
-      } else {
-        self.drag = { kind: "pan", x: pos.x, end: self.view.end };
-        cv.style.cursor = "grabbing";
+        return;
       }
+      // Plot drag pans both axes. Panning vertically locks the price window,
+      // otherwise the next auto-fit would throw the movement away.
+      self.drag = { kind: "pan", x: pos.x, y: pos.y, end: self.view.end,
+                    lo: m.lo, hi: m.hi, plotH: m.plotH };
+      cv.style.cursor = "grabbing";
     });
 
     global.addEventListener("mouseup", () => {
-      if (self.drag && self.drag.kind === "pan") cv.style.cursor =
-        self.measureMode ? "crosshair" : "default";
+      if (self.drag) cv.style.cursor = self.measureMode ? "crosshair" : "default";
       self.drag = null;
     });
 
@@ -361,18 +413,47 @@
       const m = self._geom(), pos = self._px(e);
       self.pointerY = pos.y;
       const i = m.idxAt(pos.x);
+      const d = self.drag;
 
-      if (self.drag && self.drag.kind === "pan") {
-        const shift = Math.round((self.drag.x - pos.x) / m.step);
-        self.view.end = self.drag.end + shift;
+      if (d && d.kind === "pan") {
+        self.view.end = d.end + Math.round((d.x - pos.x) / m.step);
+        self._clamp();
+        const dy = pos.y - d.y;
+        if (Math.abs(dy) > 1) {
+          const shift = dy / d.plotH * (d.hi - d.lo);
+          self.priceRange = { lo: d.lo + shift, hi: d.hi + shift };
+        }
+        self.draw(); return;
+      }
+      if (d && d.kind === "scaleY") {
+        // Drag down to compress, up to expand — the price axis stretches.
+        const factor = Math.max(0.05, Math.min(20,
+          1 + (pos.y - d.y) / Math.max(60, d.plotH * 0.5)));
+        const span = (d.hi - d.lo) * factor;
+        const frac = (d.hi - d.lo) ? (d.anchor - d.lo) / (d.hi - d.lo) : 0.5;
+        self.priceRange = { lo: d.anchor - span * frac,
+                            hi: d.anchor + span * (1 - frac) };
+        self.draw(); return;
+      }
+      if (d && d.kind === "scaleX") {
+        const factor = Math.max(0.05, Math.min(20,
+          1 + (d.x - pos.x) / Math.max(80, m.plotW * 0.5)));
+        self.view.count = Math.max(MIN_BARS,
+          Math.min(MAX_BARS, Math.round(d.count * factor)));
+        self.view.end = d.end;
         self._clamp(); self.draw(); return;
       }
-      if (self.drag && self.drag.kind === "measure") {
+      if (d && d.kind === "measure") {
         self.measure.b = Math.max(0, Math.min(self.bars.length - 1, i));
         self.measure.p2 = m.priceAt(pos.y);
         self.onMeasure(self._measureInfo());
         self.draw(); return;
       }
+
+      const where = zone(m, pos);
+      cv.style.cursor = where === "price" ? "ns-resize"
+        : where === "time" ? "ew-resize"
+        : self.measureMode ? "crosshair" : "grab";
       self.cursor = (i >= m.from && i < m.to) ? i : null;
       self.onHover(self.cursor === null ? null : self.bars[self.cursor]);
       self.draw();
@@ -383,7 +464,13 @@
       self.onHover(null); self.draw();
     });
 
-    cv.addEventListener("dblclick", () => self.resetView());
+    cv.addEventListener("dblclick", e => {
+      const m = self._geom(), pos = self._px(e), where = zone(m, pos);
+      // Double-click an axis to release just that axis; anywhere else resets both.
+      if (where === "price") self.autoPrice();
+      else if (where === "time") { self.view.count = 180; self._clamp(); self.draw(); }
+      else self.resetView();
+    });
   };
 
   Chart.prototype._measureInfo = function () {
