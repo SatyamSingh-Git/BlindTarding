@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo
 
 from ..constants import IST
 from ..models import Candle, Tick
+from .timeframe import Timeframe
 
 IST_TZ = ZoneInfo(IST)
 NSE_SESSION_START = dt.time(9, 15)
@@ -211,27 +212,70 @@ class CandleBook:
         return len(self._series)
 
 
-def resample(candles: Sequence[Candle], factor: int) -> list[Candle]:
-    """Combine N consecutive bars into one. Used to build 5m from 1m history
-    when Dhan's native interval is unavailable for an instrument."""
-    if factor <= 1:
-        return list(candles)
-    out: list[Candle] = []
-    for i in range(0, len(candles), factor):
-        group = candles[i:i + factor]
-        if not group:
-            continue
-        out.append(Candle(
-            ts=group[0].ts,
-            open=group[0].open,
-            high=max(c.high for c in group),
-            low=min(c.low for c in group),
-            close=group[-1].close,
-            volume=sum(c.volume for c in group),
-            oi=group[-1].oi,
-            closed=True,
-        ))
-    return out
+def _merge(ts: dt.datetime, group: Sequence[Candle]) -> Candle:
+    return Candle(
+        ts=ts,
+        open=group[0].open,
+        high=max(c.high for c in group),
+        low=min(c.low for c in group),
+        close=group[-1].close,
+        volume=sum(c.volume for c in group),
+        oi=group[-1].oi,
+        closed=True,
+    )
 
 
-__all__ = ["CandleSeries", "CandleBook", "resample", "NSE_SESSION_START", "MCX_SESSION_START"]
+def resample_to(
+    candles: Sequence[Candle],
+    target: Timeframe,
+    *,
+    session_start: dt.time = NSE_SESSION_START,
+) -> list[Candle]:
+    """Aggregate bars up to a larger timeframe.
+
+    Bucketed by **session-anchored wall-clock time**, never by counting bars.
+    The distinction is not academic: an NSE session is 375 minutes, which
+    divides evenly by 5, 15 and 25 but not by 30 (12.5 bars) or 60 (6.25 bars).
+    Grouping every N bars would therefore drift, and eventually emit a bar
+    opening before one day's close and closing after the next day's open — a bar
+    that exists on no chart anywhere and spans an overnight gap.
+
+    Daily and above group whole trading days, so holidays and half-days shift
+    the grid rather than tearing it.
+    """
+    if not candles:
+        return []
+    ordered = sorted(candles, key=lambda c: c.ts)
+
+    # Insertion order is chronological because `ordered` is sorted, so the
+    # buckets come out in order without a second sort.
+    groups: list[list[Candle]] = []
+    stamps: list[dt.datetime] = []
+    seen: dict[object, int] = {}
+
+    if target.is_intraday:
+        grid = CandleSeries(target.minutes, session_start=session_start)
+        keys = [grid.bar_start(c.ts) for c in ordered]
+        stamp_for = lambda i, c: keys[i]          # noqa: E731 - bar opens on the grid
+    else:
+        span = target.days or 1
+        days = sorted({c.ts.date() for c in ordered})
+        index = {day: i for i, day in enumerate(days)}
+        keys = [index[c.ts.date()] // span for c in ordered]
+        stamp_for = lambda i, c: c.ts             # noqa: E731 - first day in the group
+
+    for i, candle in enumerate(ordered):
+        key = keys[i]
+        slot = seen.get(key)
+        if slot is None:
+            seen[key] = len(groups)
+            groups.append([candle])
+            stamps.append(stamp_for(i, candle))
+        else:
+            groups[slot].append(candle)
+
+    return [_merge(stamps[i], group) for i, group in enumerate(groups)]
+
+
+__all__ = ["CandleSeries", "CandleBook", "resample_to",
+           "NSE_SESSION_START", "MCX_SESSION_START"]

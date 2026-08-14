@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .constants import ExchangeSegment, InstrumentType, OrderType, ProductType
+from .engine.timeframe import Timeframe
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = ROOT / "config"
@@ -75,18 +76,30 @@ class SignalConfig(BaseModel):
     exchange_segment: ExchangeSegment
     security_id: str
     instrument_type: InstrumentType = InstrumentType.INDEX
-    timeframe: int = 5  # minutes
+    # Anything from "5m" to "2D". Validated at load so a typo fails at startup
+    # rather than halfway through a trading session.
+    timeframe: str = "5m"
 
     @field_validator("security_id", mode="before")
     @classmethod
     def _stringify(cls, v: Any) -> str:
         return str(v)
 
+    @field_validator("timeframe", mode="before")
+    @classmethod
+    def _normalise_timeframe(cls, v: Any) -> str:
+        return Timeframe.parse(v).label
+
+    @property
+    def tf(self) -> Timeframe:
+        return Timeframe.parse(self.timeframe)
+
 
 class StrategyConfig(BaseModel):
     preset: str = "svmkr_ut_hma_orb"
-    # Defaults are placeholders until the real Pine source is ported — see
-    # PLAN.md section 6. Do not trade these numbers before validation.
+    # Anything omitted falls back to the values read off the live chart legend
+    # ("3 1 31 5 1010-1015"), NOT the Pine input() defaults — the source
+    # defaults ut_key to 2 where the chart runs 3.
     params: dict[str, Any] = Field(default_factory=dict)
     signal_on_bar_close: bool = True
 

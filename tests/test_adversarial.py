@@ -29,7 +29,7 @@ import pytest
 from orbot.broker.dhan_feed import parse_frame, parse_packet
 from orbot.broker.instruments import InstrumentError, InstrumentRegistry
 from orbot.constants import ExchangeSegment, FeedCode, InstrumentType, OptionType
-from orbot.engine.candles import CandleSeries, resample
+from orbot.engine.candles import CandleSeries
 from orbot.models import Candle, Tick
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -228,24 +228,8 @@ class TestAggregationUnderStress:
         assert len(series.bars) == 0
 
 
-class TestResampleEdges:
-    def test_empty_input(self):
-        assert resample([], 5) == []
-
-    def test_ragged_tail_is_kept(self):
-        bars = [Candle(ts=at(9, 15 + i), open=1, high=2, low=0, close=1) for i in range(7)]
-        out = resample(bars, 5)
-        assert len(out) == 2  # 5 + a partial 2, not silently truncated
-
-    def test_factor_larger_than_input(self):
-        bars = [Candle(ts=at(9, 15), open=1, high=2, low=0, close=1)]
-        assert len(resample(bars, 100)) == 1
-
-    def test_aggregated_high_low_bound_the_group(self):
-        bars = [Candle(ts=at(9, 15 + i), open=10, high=10 + i, low=10 - i, close=10)
-                for i in range(5)]
-        out = resample(bars, 5)[0]
-        assert out.high == 14 and out.low == 6
+# Resampling and timeframe selection are covered in test_timeframe.py,
+# including the cross-day bar bug that count-based grouping produces.
 
 
 # =====================================================================

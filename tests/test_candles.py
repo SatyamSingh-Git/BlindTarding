@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from orbot.constants import ExchangeSegment
-from orbot.engine.candles import CandleSeries, resample
+from orbot.engine.candles import CandleSeries
 from orbot.models import Candle, Tick
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -151,19 +151,5 @@ class TestSeed:
         assert series.closes() == [1.5, 2.5]
 
 
-class TestResample:
-    def test_five_one_minute_bars_become_one_five_minute_bar(self):
-        bars = [Candle(ts=at(9, 15 + i), open=10 + i, high=20 + i, low=5 + i, close=15 + i,
-                       volume=100) for i in range(5)]
-        out = resample(bars, 5)
-        assert len(out) == 1
-        assert out[0].ts == at(9, 15)
-        assert out[0].open == 10
-        assert out[0].close == 19
-        assert out[0].high == 24
-        assert out[0].low == 5
-        assert out[0].volume == 500
-
-    def test_factor_one_is_a_passthrough(self):
-        bars = [Candle(ts=at(9, 15), open=1, high=1, low=1, close=1)]
-        assert resample(bars, 1) == bars
+# Resampling to larger timeframes lives in test_timeframe.py — it is a
+# timeframe concern, not a tick-aggregation one.

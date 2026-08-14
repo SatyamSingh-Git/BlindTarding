@@ -9,6 +9,8 @@ Phase 0/1 commands — everything here works before a single order is ever place
     orbot warmup nifty-atm-ce   pull historical candles for a plan
     orbot feed nifty-atm-ce     stream live ticks and print bars as they close
     orbot plans             list configured trade plans
+    orbot timeframes        list every timeframe the engine can serve
+    orbot signals nifty-atm-ce -t 15m   replay history, list every signal
 """
 
 from __future__ import annotations
@@ -34,7 +36,16 @@ from .broker.instruments import (
 from .config import DATA_DIR, HALT_FILE, TradePlan, get_settings, load_plans, load_risk
 from .constants import ExchangeSegment, InstrumentType, OptionType
 from .engine.candles import CandleSeries
+from .engine.history import fetch_candles
 from .engine.strategy import SvmkrUtHmaOrb, params_from_config
+from .engine.timeframe import (
+    MAX_DAYS,
+    MIN_INTRADAY_MINUTES,
+    Timeframe,
+    TimeframeError,
+    describe_support,
+    supported,
+)
 from .models import Action, Candle, Instrument
 
 app = typer.Typer(add_completion=False, help="Automated SVMKR_UT_HMA_ORB execution on Dhan.")
@@ -77,6 +88,28 @@ def _find_plan(name: str) -> TradePlan:
 
 def _signal_instrument(plan: TradePlan, registry: InstrumentRegistry) -> Instrument:
     return registry.get(plan.signal.exchange_segment, plan.signal.security_id)
+
+
+def _timeframe(plan: TradePlan, override: str | None) -> Timeframe:
+    """CLI flag wins over the plan's configured timeframe."""
+    try:
+        return Timeframe.parse(override) if override else plan.signal.tf
+    except TimeframeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        console.print("Run [bold]orbot timeframes[/bold] to see what is available.")
+        raise typer.Exit(1) from None
+
+
+def _warn_if_resampled(tf: Timeframe) -> None:
+    if tf.is_native:
+        return
+    source = (f"{tf.base_interval}m x {tf.resample_factor}" if tf.is_intraday
+              else f"daily x {tf.resample_factor}")
+    console.print(
+        f"[yellow]{tf.label} is resampled ({source}), not served natively by "
+        "Dhan.[/yellow] Bar boundaries are ours, not the exchange's — verify a "
+        "few bars against the chart before trusting signals at this timeframe."
+    )
 
 
 @app.callback()
@@ -184,7 +217,7 @@ def plans() -> None:
             plan.name,
             "[green]yes[/green]" if plan.enabled else "[dim]no[/dim]",
             f"{plan.signal.exchange_segment.value}/{plan.signal.security_id}",
-            f"{plan.signal.timeframe}m",
+            plan.signal.timeframe,
             exec_desc, size, plan.risk.square_off_time.strftime("%H:%M"),
         )
     console.print(table)
@@ -266,8 +299,32 @@ def chain(
 
 # --- data ---------------------------------------------------------------
 @app.command()
+def timeframes() -> None:
+    """List every timeframe the engine can serve, and where each comes from."""
+    table = Table(title=f"supported timeframes ({MIN_INTRADAY_MINUTES}m to {MAX_DAYS}D)")
+    for col in ("timeframe", "source", "bars/session", "note"):
+        table.add_column(col)
+    for tf, (label, source, caveat) in zip(supported(), describe_support()):
+        rate = tf.approx_bars_per_session
+        table.add_row(
+            f"[bold]{label}[/bold]" if tf.is_native else label,
+            source,
+            f"{rate:.2f}" if rate < 10 else f"{rate:.0f}",
+            f"[green]{caveat}[/green]" if tf.is_native else f"[yellow]{caveat}[/yellow]",
+        )
+    console.print(table)
+    console.print("\n[dim]Bold timeframes come straight from Dhan and can be "
+                  "validated against the chart directly. The rest are aggregated "
+                  "by us, so their bar boundaries need checking separately.[/dim]")
+    console.print("Override per command with [bold]--timeframe / -t[/bold], "
+                  "e.g. [bold]orbot signals nifty-atm-ce -t 15m[/bold]")
+
+
+@app.command()
 def warmup(
     plan_name: str,
+    timeframe: Optional[str] = typer.Option(None, "--timeframe", "-t",
+                                            help="Override the plan's timeframe"),
     days: int = typer.Option(10, "--days", "-d"),
     show: int = typer.Option(10, "--show", "-n"),
 ) -> None:
@@ -278,23 +335,21 @@ def warmup(
     every session-based rule downstream.
     """
     plan = _find_plan(plan_name)
+    tf = _timeframe(plan, timeframe)
+    _warn_if_resampled(tf)
     registry = _registry()
     inst = _signal_instrument(plan, registry)
     end = dt.datetime.now()
     start = end - dt.timedelta(days=days)
 
     with _client() as client:
-        candles = client.intraday(inst, plan.signal.timeframe, start, end)
+        candles = fetch_candles(client, inst, tf, start, end)
 
     if not candles:
         console.print("[red]no candles returned[/red] — check the instrument and date range")
         raise typer.Exit(1)
 
-    series = CandleSeries(plan.signal.timeframe)
-    series.seed(candles)
-
-    console.print(f"[green]{len(candles)}[/green] x {plan.signal.timeframe}m candles "
-                  f"for {inst}")
+    console.print(f"[green]{len(candles)}[/green] x {tf.label} candles for {inst}")
     console.print(f"range: {candles[0].ts} -> {candles[-1].ts}")
     _print_candles(candles[-show:], title=f"last {show} bars — compare against the Dhan chart")
 
@@ -302,10 +357,17 @@ def warmup(
 @app.command()
 def feed(
     plan_name: str,
+    timeframe: Optional[str] = typer.Option(None, "--timeframe", "-t",
+                                            help="Override the plan's timeframe"),
     seconds: int = typer.Option(120, "--seconds", "-s"),
 ) -> None:
     """Stream live ticks for a plan and print bars as they close."""
     plan = _find_plan(plan_name)
+    tf = _timeframe(plan, timeframe)
+    if not tf.is_intraday:
+        console.print(f"[red]{tf.label} bars close once a day[/red] — "
+                      "live streaming only makes sense on intraday timeframes.")
+        raise typer.Exit(1)
     registry = _registry()
     inst = _signal_instrument(plan, registry)
     settings = get_settings()
@@ -313,7 +375,7 @@ def feed(
         console.print("[red]credentials required[/red] — see .env.example")
         raise typer.Exit(1)
 
-    series = CandleSeries(plan.signal.timeframe)
+    series = CandleSeries(tf.minutes)
     stats = {"ticks": 0, "last": None}
 
     def on_tick(tick) -> None:
@@ -379,6 +441,8 @@ def _print_candles(candles: list[Candle], *, title: str) -> None:
 @app.command()
 def signals(
     plan_name: str,
+    timeframe: Optional[str] = typer.Option(None, "--timeframe", "-t",
+                                            help="Override the plan's timeframe"),
     days: int = typer.Option(30, "--days", "-d"),
     show: int = typer.Option(40, "--show", "-n", help="0 for all"),
     csv_out: Optional[str] = typer.Option(None, "--csv", help="Write signals to a CSV"),
@@ -392,6 +456,8 @@ def signals(
     trade.
     """
     plan = _find_plan(plan_name)
+    tf = _timeframe(plan, timeframe)
+    _warn_if_resampled(tf)
     registry = _registry()
     inst = _signal_instrument(plan, registry)
     params = params_from_config(plan.strategy.params)
@@ -399,7 +465,7 @@ def signals(
     end = dt.datetime.now()
     start = end - dt.timedelta(days=days)
     with _client() as client:
-        candles = client.intraday(inst, plan.signal.timeframe, start, end)
+        candles = fetch_candles(client, inst, tf, start, end)
     if not candles:
         console.print("[red]no candles returned[/red]")
         raise typer.Exit(1)
@@ -408,8 +474,7 @@ def signals(
     result = strategy.evaluate(candles)
     found = strategy.signals(candles)
 
-    console.print(f"[green]{len(candles)}[/green] x {plan.signal.timeframe}m bars "
-                  f"for {inst}")
+    console.print(f"[green]{len(candles)}[/green] x {tf.label} bars for {inst}")
     console.print(f"range: {candles[0].ts:%Y-%m-%d %H:%M} -> {candles[-1].ts:%Y-%m-%d %H:%M}")
     console.print(f"params: ut_key={params.ut_key} atr={params.ut_atr_period} "
                   f"hma={params.hma_length} orb={params.orb_session} "
