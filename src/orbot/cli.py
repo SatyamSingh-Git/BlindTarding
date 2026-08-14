@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -33,7 +34,8 @@ from .broker.instruments import (
 from .config import DATA_DIR, HALT_FILE, TradePlan, get_settings, load_plans, load_risk
 from .constants import ExchangeSegment, InstrumentType, OptionType
 from .engine.candles import CandleSeries
-from .models import Candle, Instrument
+from .engine.strategy import SvmkrUtHmaOrb, params_from_config
+from .models import Action, Candle, Instrument
 
 app = typer.Typer(add_completion=False, help="Automated SVMKR_UT_HMA_ORB execution on Dhan.")
 console = Console()
@@ -372,6 +374,108 @@ def _print_candles(candles: list[Candle], *, title: str) -> None:
         table.add_row(c.ts.strftime("%Y-%m-%d %H:%M"), f"{c.open:,.2f}", f"{c.high:,.2f}",
                       f"{c.low:,.2f}", f"{c.close:,.2f}", f"{c.volume:,}")
     console.print(table)
+
+
+@app.command()
+def signals(
+    plan_name: str,
+    days: int = typer.Option(30, "--days", "-d"),
+    show: int = typer.Option(40, "--show", "-n", help="0 for all"),
+    csv_out: Optional[str] = typer.Option(None, "--csv", help="Write signals to a CSV"),
+) -> None:
+    """Replay history through the strategy and list every signal it produces.
+
+    This is the validation-gate tool (PLAN.md section 6). Compare the timestamps
+    printed here against the Buy/Sell labels on your TradingView chart. The gate
+    is 200+ signals matching on both direction and bar timestamp, at 100%.
+    A near-match is a failure — one bar of drift is one bar of drift on every
+    trade.
+    """
+    plan = _find_plan(plan_name)
+    registry = _registry()
+    inst = _signal_instrument(plan, registry)
+    params = params_from_config(plan.strategy.params)
+
+    end = dt.datetime.now()
+    start = end - dt.timedelta(days=days)
+    with _client() as client:
+        candles = client.intraday(inst, plan.signal.timeframe, start, end)
+    if not candles:
+        console.print("[red]no candles returned[/red]")
+        raise typer.Exit(1)
+
+    strategy = SvmkrUtHmaOrb(params, plan=plan.name)
+    result = strategy.evaluate(candles)
+    found = strategy.signals(candles)
+
+    console.print(f"[green]{len(candles)}[/green] x {plan.signal.timeframe}m bars "
+                  f"for {inst}")
+    console.print(f"range: {candles[0].ts:%Y-%m-%d %H:%M} -> {candles[-1].ts:%Y-%m-%d %H:%M}")
+    console.print(f"params: ut_key={params.ut_key} atr={params.ut_atr_period} "
+                  f"hma={params.hma_length} orb={params.orb_session} "
+                  f"ha={params.use_heikin_ashi}")
+
+    warm = params.min_bars
+    if len(candles) <= warm:
+        console.print(f"[yellow]only {len(candles)} bars — the first {warm} are warmup, "
+                      "so signals here are not trustworthy[/yellow]")
+
+    buys = sum(1 for s in found if s.action == Action.BUY)
+    sells = len(found) - buys
+    sessions = len({c.ts.date() for c in candles})
+    console.print(f"\n[bold]{len(found)} signals[/bold] — {buys} buy, {sells} sell, "
+                  f"over {sessions} sessions "
+                  f"({len(found) / max(sessions, 1):.1f} per session)")
+    if params.require_hma_agreement or params.require_orb_breakout:
+        raw = sum(result.raw_buy) + sum(result.raw_sell)
+        console.print(f"[yellow]filters active — {raw} raw signals reduced to "
+                      f"{len(found)}[/yellow]")
+
+    rows = found if show == 0 else found[-show:]
+    table = Table(title=f"signals (showing {len(rows)} of {len(found)})")
+    for col in ("bar timestamp (IST)", "action", "price", "ut stop", "atr",
+                "hma", "orb high", "orb low"):
+        table.add_column(col)
+    for sig in rows:
+        meta = sig.meta
+        colour = "green" if sig.action == Action.BUY else "red"
+        table.add_row(
+            sig.bar_ts.strftime("%Y-%m-%d %H:%M"),
+            f"[{colour}]{sig.action}[/{colour}]",
+            f"{sig.price:,.2f}",
+            _fmt(meta.get("stop")), _fmt(meta.get("atr")),
+            _fmt(meta.get("hma")), _fmt(meta.get("orb_high")), _fmt(meta.get("orb_low")),
+        )
+    console.print(table)
+
+    if csv_out:
+        import csv as _csv
+        path = Path(csv_out)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="", encoding="utf-8") as fh:
+            writer = _csv.writer(fh)
+            writer.writerow(["bar_ts", "action", "price", "ut_stop", "atr", "hma",
+                             "orb_high", "orb_low"])
+            for sig in found:
+                m = sig.meta
+                writer.writerow([sig.bar_ts.isoformat(), sig.action, sig.price,
+                                 m.get("stop"), m.get("atr"), m.get("hma"),
+                                 m.get("orb_high"), m.get("orb_low")])
+        console.print(f"[green]wrote[/green] {len(found)} signals -> {path}")
+
+    console.print("\n[dim]Compare these timestamps against the Buy/Sell labels on "
+                  "your TradingView chart. Any mismatch must be resolved before "
+                  "going live.[/dim]")
+
+
+def _fmt(value: object) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)):
+        return f"{value:,.2f}"
+    return str(value)
 
 
 @app.command()

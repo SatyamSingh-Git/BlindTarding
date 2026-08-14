@@ -4,8 +4,28 @@
 # The indicator runs on `signal`; `execution` decides what actually gets bought.
 # That split is what lets one engine trade index options, futures and cash.
 #
-# NOTE: every plan below is `enabled: false`. Nothing trades until the Pine port
-# clears the validation gate in PLAN.md section 6.
+# STRATEGY PARAMS BELOW ARE THE REAL ONES, read off the live chart legend
+# ("SVMKR_UT_HMA_ORB  3  1  31  5  1010-1015") and the Inputs dialog — NOT the
+# input() defaults in the Pine source, which differ (the source defaults
+# ut_key to 2, the chart runs 3).
+#
+# NOTE: every plan is `enabled: false`. Nothing trades until the port clears the
+# validation gate in PLAN.md section 6.
+
+defaults: &svmkr_params
+  ut_key: 3.0              # chart legend value 1 — source default is 2
+  ut_atr_period: 1         # ATR(1) == raw true range; a very fast stop
+  use_heikin_ashi: false   # checkbox unchecked on the chart
+  hma_length: 31           # plot-only, does not gate signals
+  orb_minutes: 5           # plot-only
+  orb_session: "1010-1015" # 10:10-10:15 IST — NOT the market open
+
+  # Deviations from the indicator. The Pine source does NOT gate buy/sell on
+  # the Hull MA or the opening range, so both default off in order to reproduce
+  # the chart exactly. Turning either on changes the strategy and requires the
+  # validation gate to be re-run.
+  require_hma_agreement: false
+  require_orb_breakout: false
 
 plans:
   # --- index options: signal on NIFTY spot, buy an ATM call ---------------
@@ -15,18 +35,11 @@ plans:
       exchange_segment: IDX_I
       security_id: "13"          # NIFTY 50
       instrument_type: INDEX
-      timeframe: 5
+      timeframe: 5               # confirm against the chart you actually watch
     strategy:
       preset: svmkr_ut_hma_orb
       signal_on_bar_close: true  # intrabar signals repaint — see PLAN.md section 5
-      params:
-        # PLACEHOLDERS. Replaced with the real Pine defaults once the source
-        # lands. Do not trade these numbers.
-        ut_key: 1.0
-        ut_atr_period: 10
-        hma_length: 55
-        orb_start: "09:15"
-        orb_end: "09:30"
+      params: *svmkr_params
     execution:
       mode: option
       underlying: NIFTY
@@ -51,10 +64,10 @@ plans:
       exchange_segment: IDX_I
       security_id: "25"          # BANKNIFTY
       instrument_type: INDEX
-      timeframe: 15
+      timeframe: 5
     strategy:
       preset: svmkr_ut_hma_orb
-      params: {}
+      params: *svmkr_params
     execution:
       mode: future
       underlying: BANKNIFTY
@@ -78,7 +91,7 @@ plans:
       timeframe: 15
     strategy:
       preset: svmkr_ut_hma_orb
-      params: {}
+      params: *svmkr_params
     execution:
       mode: same
       on_sell: exit

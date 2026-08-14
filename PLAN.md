@@ -139,32 +139,76 @@ expiry ↔ strike. This is what makes multi-instrument support tractable.
 
 ---
 
-## 5. Indicator port — Pine → Python
+## 5. Indicator port — RESOLVED
 
-The three components, and how Pine computes them:
+Source obtained (Pine v4, "Perfect working version 19"), saved verbatim at
+[`docs/SVMKR_UT_HMA_ORB.pine`](docs/SVMKR_UT_HMA_ORB.pine). Port complete.
 
-**UT Bot** — ATR trailing stop. `nLoss = keyValue * ta.atr(atrPeriod)`. The stop
-ratchets up in an uptrend, down in a downtrend, and flips on cross. Buy when price
-crosses above the stop and `ema(close,1) > stop`. Optional Heikin Ashi source.
+### The headline finding: the name is misleading
 
-**HMA** — `wma(2*wma(src, n/2) - wma(src, n), floor(sqrt(n)))`. Colour flips on slope.
+Tracing the source, `buy` and `sell` depend **only** on the UT Bot trailing stop:
 
-**ORB** — high/low of a defined opening window (typically 09:15–09:30 IST); a breakout
-of that range confirms direction.
+```
+buy  = src > xATRTrailingStop and crossover(ema(src,1), xATRTrailingStop)
+sell = src < xATRTrailingStop and crossover(xATRTrailingStop, ema(src,1))
+```
 
-### Gotchas that will silently break fidelity
+`n1` (the Hull MA) appears only in a colour expression and a `plot()`.
+`orb_high` / `orb_low` appear only in their own computation and two `plot()`
+calls. **Neither is referenced by `buy`, `sell`, or either `alertcondition`.**
+The UCS_LRS block is commented out in its entirety.
 
-1. **ATR must be Wilder's RMA**, not SMA. `pandas.rolling().mean()` is wrong.
-   `rma[i] = (rma[i-1]*(n-1) + tr[i]) / n`.
-2. **HMA needs WMA**, not SMA or EMA, at all three stages.
-3. **Warmup** — need roughly 3× the longest period of prior bars before the first
-   valid signal. Seed from the historical API, never from a cold live start.
-4. **Repaint** — the UT Bot stop flips intrabar. Bar-close-only is the default and the
-   safe choice; intrabar is configurable but will produce ghost signals.
-5. **Timezone** — TradingView uses exchange time (Asia/Kolkata for NSE). All session
-   logic in IST, DST-free but holiday-aware.
-6. **`na` / `nz()` semantics** — Pine's null handling on early bars differs from numpy
-   NaN propagation. Port explicitly.
+So every Buy/Sell label on the chart, and every alert the script can fire, is
+pure UT Bot. The Hull MA and the opening range are visual context for a human,
+not filters. Both are ported and exposed as *optional* filters
+(`require_hma_agreement`, `require_orb_breakout`), defaulting to **off** so the
+engine reproduces the chart exactly.
+
+### Real parameters (chart, not source defaults)
+
+The legend reads `SVMKR_UT_HMA_ORB  3  1  31  5  1010-1015`. Note the first
+value disagrees with the source:
+
+| Parameter | Source default | **Chart (live)** |
+|---|---|---|
+| UT Key Value | 2 | **3** |
+| UT ATR Period | 1 | 1 |
+| Heikin Ashi | false | false |
+| Hull MA Period | 31 | 31 |
+| ORB minutes | 5 | 5 |
+| ORB session | 1010-1015 | 1010-1015 |
+
+Two things to flag: **ATR period is 1**, so ATR is the raw true range of each
+bar and the stop reacts to a single bar. And the **ORB session is 10:10–10:15,
+not the market open** — despite the name, this is a mid-morning range.
+
+### Pine semantics handled
+
+* `round()` is half-away-from-zero, not Python's banker's rounding. At n=31 the
+  two agree by luck; at n=29 they would not.
+* `atr()` is Wilder RMA seeded with an SMA, not a rolling mean. At period 1 it
+  collapses to the true range.
+* `ema(src, 1)` is the identity (alpha = 1), so `buy` reduces to
+  `crossover(close, stop)`. Kept literal in the port so it can be diffed
+  against the Pine line by line.
+* `crossover` tests `a[1] <= b[1]`, not `<` — a touch then a break counts.
+* Comparisons against `na` are false, not NaN-propagating.
+* ORB sessions are `[start, end)`; a 10:15 bar is outside a `1010-1015` window.
+
+### Estimated signal frequency
+
+Simulated on a NIFTY-like random walk (**not** real data — to be replaced by
+`orbot signals` against Dhan history). Counts are volatility-invariant, since
+ATR scales the stop with volatility:
+
+| Timeframe | signals/session at key=3, ATR=1 |
+|---|---|
+| 1m | ~22 |
+| **5m** | **~4.5** |
+| 15m | ~1.2 |
+
+Since SELL means exit, that is roughly half as many round trips. On 5m this is
+~2 round trips a day, comfortably inside the `max_trades_per_day: 4` cap.
 
 ---
 
@@ -173,8 +217,8 @@ of that range confirms direction.
 If our Python signals differ from the chart, everything downstream is worthless.
 This gate is where the extra time gets spent, and it is not skippable.
 
-1. Obtain the exact Pine source of `SVMKR_UT_HMA_ORB` (**blocker — needed from you**).
-2. Port line-by-line with the §5 gotchas handled.
+1. ~~Obtain the exact Pine source.~~ **Done** — see `docs/SVMKR_UT_HMA_ORB.pine`.
+2. ~~Port line-by-line with the §5 gotchas handled.~~ **Done** — 180 tests pass.
 3. Pull 90 days of 1-min history from Dhan for each signal instrument.
 4. Replay through the engine → emit a timestamped signal list.
 5. On TradingView, apply the same indicator over the same range; export or spot-check
@@ -319,10 +363,14 @@ Crash ⇒ immediate Telegram alert. Heartbeat every 30 min while the market is o
 
 ## 13. Open questions — needed before Phase 2
 
-1. **Pine source of `SVMKR_UT_HMA_ORB`** — exact version, from TradingView's Pine
-   Editor. **Hard blocker.** Without it the port is guesswork.
-2. **What does SELL mean?** Exit the long only, or reverse into a short / buy a PE?
-   This materially changes the resolver and the risk profile.
+1. ~~Pine source.~~ **Received and ported.**
+2. ~~What does SELL mean?~~ **Decided: exit the long and go flat.**
+2b. **Which chart timeframe do you actually trade?** The ORB plot is gated on
+   `timeframe.multiplier <= 5`, so your chart is 5-minute or faster. 1m produces
+   roughly 5x the signals of 5m — this materially changes the trade count.
+2c. **Do you want the HMA / ORB as filters?** They are decorative in the source.
+   If you have been reading them by eye before taking a trade, the bot will not
+   do that unless told to.
 3. Dhan `client_id` + `access_token` (web.dhan.co → Profile → DhanHQ Trading APIs).
 4. Decodo static IP + proxy credentials, and confirmation it is dedicated and static.
 5. Telegram bot token + chat ID (via @BotFather).
