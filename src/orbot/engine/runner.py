@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 from dataclasses import dataclass, field
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -91,8 +92,10 @@ class TradingEngine:
         notifier: Notifier,
         killswitch: KillSwitch,
         calendar: MarketCalendar,
+        token_provider: Callable[[], str] | None = None,
     ) -> None:
         self.settings = settings
+        self.token_provider = token_provider
         self.risk = risk
         self.registry = registry
         self.client = client
@@ -486,9 +489,11 @@ class TradingEngine:
         await self.warmup()
         await self.adopt_broker_positions()
 
-        if self.settings.dhan_access_token:
+        if self.token_provider is not None:
+            # A callable, not a captured string: a socket that drops overnight
+            # must reconnect with a current token, not the one it started with.
             self.feed = DhanFeed(self.settings.dhan_client_id,
-                                 self.settings.dhan_access_token,
+                                 self.token_provider,
                                  on_tick=self.on_tick)
             self.feed.add(self._subscriptions())
             self._tasks.append(asyncio.create_task(self.feed.run()))

@@ -33,6 +33,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import logging_setup
+from .broker.auth import AuthError, TokenManager
 from .broker.dhan_client import DhanAPIError, DhanClient
 from .broker.dhan_feed import DhanFeed, FeedInstrument
 from .broker.instruments import (
@@ -83,6 +84,22 @@ def _registry(*, underlyings: list[str] | None = None) -> InstrumentRegistry:
     return InstrumentRegistry.load(path, underlyings=underlyings)
 
 
+def _token_manager(settings=None) -> TokenManager:
+    """Single source of a currently-valid token.
+
+    Dhan tokens last 24 hours, so anything long-running must be able to mint a
+    new one rather than hold the string it started with.
+    """
+    settings = settings or get_settings()
+    return TokenManager(
+        settings.dhan_client_id,
+        static_token=settings.dhan_access_token,
+        pin=settings.dhan_pin,
+        totp_secret=settings.dhan_totp_secret,
+        cache_path=settings.token_cache_path,
+    )
+
+
 def _client() -> DhanClient:
     settings = get_settings()
     missing = settings.missing_credentials()
@@ -92,7 +109,7 @@ def _client() -> DhanClient:
         raise typer.Exit(1)
     return DhanClient(
         settings.dhan_client_id,
-        settings.dhan_access_token,
+        _token_manager(settings),
         order_proxy=settings.dhan_order_proxy or None,
         proxy_data_calls=settings.proxy_data_calls,
         max_orders_per_second=settings.max_orders_per_second,
@@ -165,6 +182,17 @@ def doctor() -> None:
     mode_warn = "[red]LIVE — real money[/red]" if settings.is_live else "paper (simulated)"
     row("trade mode", True, mode_warn)
 
+    tokens = _token_manager(settings)
+    if tokens.can_self_renew:
+        row("access token", True,
+            f"self-renewing via TOTP — {tokens.describe()}")
+    elif settings.dhan_access_token:
+        row("access token", False,
+            "STATIC — Dhan tokens expire in 24h, so unattended running will "
+            "break every morning. Set DHAN_PIN + DHAN_TOTP_SECRET.")
+    else:
+        row("access token", False, "none configured")
+
     row("static IP proxy", bool(settings.dhan_order_proxy),
         "configured" if settings.dhan_order_proxy
         else "NOT SET — Dhan requires a whitelisted static IP for order placement")
@@ -199,6 +227,61 @@ def doctor() -> None:
     console.print(table)
     if not ok:
         raise typer.Exit(1)
+
+
+@app.command()
+def token(
+    generate: bool = typer.Option(False, "--generate", "-g",
+                                  help="Mint a fresh token via TOTP"),
+    renew: bool = typer.Option(False, "--renew", "-r",
+                               help="Extend the current token by 24h"),
+) -> None:
+    """Inspect or refresh the Dhan access token.
+
+    Dhan tokens are valid for 24 hours. Without TOTP configured, an unattended
+    bot stops working every morning — so this is worth getting right before
+    anything runs on its own.
+    """
+    settings = get_settings()
+    manager = _token_manager(settings)
+
+    if generate or renew:
+        try:
+            info = manager.generate() if generate else manager.renew()
+        except AuthError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from None
+        console.print(f"[green]token {'generated' if generate else 'renewed'}[/green]"
+                      f" — {manager.describe()}")
+        console.print(f"cached to {settings.token_cache_path}")
+        return
+
+    table = Table(title="access token")
+    table.add_column("field")
+    table.add_column("value")
+    info = manager.info
+    table.add_row("client id", settings.dhan_client_id or "[red]not set[/red]")
+    table.add_row("token", info.redacted() if info else "[red]none[/red]")
+    table.add_row("source", info.source if info else "-")
+    if info and info.expires_at:
+        colour = "green" if (info.hours_left or 0) > 2 else "red"
+        table.add_row("expires", f"[{colour}]{info.expires_at:%Y-%m-%d %H:%M} IST "
+                                 f"({info.hours_left:.1f}h left)[/{colour}]")
+    else:
+        table.add_row("expires", "[yellow]unknown — assume within 24h[/yellow]")
+    table.add_row("self-renewing",
+                  "[green]yes, via TOTP[/green]" if manager.can_self_renew
+                  else "[red]NO — will break within 24h[/red]")
+    console.print(table)
+
+    if not manager.can_self_renew:
+        console.print("")
+        console.print("[yellow]For unattended running:[/yellow] open the Dhan API "
+                      "page, click [bold]Add TOTP[/bold], then set "
+                      "[bold]DHAN_PIN[/bold] and [bold]DHAN_TOTP_SECRET[/bold] in "
+                      ".env. The secret is the base32 string next to the QR code, "
+                      "not the 6-digit code.")
+        console.print("Then verify with [bold]orbot token --generate[/bold].")
 
 
 @app.command()
@@ -602,7 +685,7 @@ def _build_context(mode: str | None = None):
     client = None
     if not settings.missing_credentials():
         client = DhanClient(
-            settings.dhan_client_id, settings.dhan_access_token,
+            settings.dhan_client_id, _token_manager(settings),
             order_proxy=settings.dhan_order_proxy or None,
             proxy_data_calls=settings.proxy_data_calls,
             max_orders_per_second=settings.max_orders_per_second,
@@ -613,6 +696,7 @@ def _build_context(mode: str | None = None):
         settings=settings, plans=plans_cfg, risk=risk, registry=registry,
         client=client, oms=oms, journal=journal, notifier=notifier,
         killswitch=killswitch, calendar=calendar,
+        token_provider=(_token_manager(settings).token if client else None),
     )
     return settings, engine, journal
 

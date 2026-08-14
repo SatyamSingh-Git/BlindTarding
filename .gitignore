@@ -11,6 +11,7 @@ venv/
 data/*.csv
 data/*.db
 data/*.db-journal
+data/.token.json
 data/warmup/
 logs/
 HALT

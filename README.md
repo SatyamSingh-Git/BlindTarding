@@ -70,9 +70,10 @@ futures and equities from config alone.
 ```bash
 pip install -e ".[dev]"
 cp .env.example .env          # fill in Dhan credentials
-pytest -q                     # 418 tests, no credentials needed
+pytest -q                     # 461 tests, no credentials needed
 
 orbot doctor                  # config, credentials, connectivity
+orbot token                   # token lifetime and whether it self-renews
 orbot instruments             # download today's scrip master
 orbot timeframes              # what the engine can serve, and from where
 orbot resolve NIFTY           # look up a security id
@@ -169,7 +170,16 @@ docs/
   SVMKR_UT_HMA_ORB.pine   the source, verbatim
 ```
 
-## Two things that will bite you
+## Three things that will bite you
+
+**Tokens expire every 24 hours.** Dhan access tokens are valid for one day, so a
+static `DHAN_ACCESS_TOKEN` means the bot stops working every morning — and it
+dies overnight, so the first thing to break is the market open, unattended,
+possibly with positions on. Set up TOTP on the Dhan API page and configure
+`DHAN_PIN` + `DHAN_TOTP_SECRET`; the bot then mints its own token *before* the
+current one expires, rather than reacting to a failure. Check with
+`orbot token`. Both `doctor` and `token` fail loudly if the setup would break
+overnight.
 
 **Static IP.** Dhan requires a whitelisted static IP for order placement,
 modification and cancellation. Data APIs do not. A Cloudflare Tunnel does *not*
@@ -183,18 +193,19 @@ available and will produce entries that vanish before the candle closes.
 
 ## Testing
 
-418 tests. Roughly a third are adversarial — the threat model is not an attacker,
+461 tests. Roughly a third are adversarial — the threat model is not an attacker,
 it's a bad afternoon: a truncated frame during a reconnect, a NaN from a stale
 contract, a volume counter reset at midnight, a CSV that changed shape
 overnight. Each of those can produce a *plausible* wrong number that gets
 traded on.
 
-The suite has caught six real bugs so far: a malformed FULL packet layout,
+The suite has caught seven real bugs so far: a malformed FULL packet layout,
 non-finite prices reaching the candle engine, a NaN spot silently selecting a
 real-but-wrong strike, Dhan's `0001-01-01` null-expiry sentinel sorting ahead of
 every genuine expiry, a resampler that emitted bars spanning overnight gaps, and
 a fill ledger keyed on the order rather than the intent — which double-counted
-when two order attempts collided on a blank id.
+when two order attempts collided on a blank id — and a token cache that crashed
+the process at startup when it held valid JSON of the wrong shape.
 
 ```bash
 pytest tests/test_adversarial.py -q

@@ -217,14 +217,17 @@ class DhanFeed:
     def __init__(
         self,
         client_id: str,
-        access_token: str,
+        access_token: str | Callable[[], str],
         *,
         mode: FeedRequestCode = FeedRequestCode.SUBSCRIBE_QUOTE,
         on_tick: TickHandler | None = None,
         max_backoff: float = 30.0,
     ) -> None:
         self.client_id = str(client_id)
-        self._token = access_token
+        # A callable rather than a captured string: tokens last 24 hours, and a
+        # socket that drops overnight must reconnect with a *current* token, not
+        # the one it started with.
+        self._token_source = access_token
         self.mode = mode
         self.on_tick = on_tick
         self.max_backoff = max_backoff
@@ -237,7 +240,9 @@ class DhanFeed:
 
     @property
     def url(self) -> str:
-        return (f"{FEED_URL}?version=2&token={self._token}"
+        token = (self._token_source() if callable(self._token_source)
+                 else self._token_source)
+        return (f"{FEED_URL}?version=2&token={token}"
                 f"&clientId={self.client_id}&authType=2")
 
     @property

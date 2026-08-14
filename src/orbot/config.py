@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     dhan_client_id: str = ""
     dhan_access_token: str = ""
 
+    # Dhan tokens last 24 hours. With a PIN and TOTP secret the bot mints its
+    # own; without them a static token above stops working within a day.
+    dhan_pin: str = ""
+    dhan_totp_secret: str = ""
+
     # Dhan requires a whitelisted static IP for order placement. Empty means we
     # call direct, which only works if this machine's own IP is whitelisted.
     dhan_order_proxy: str = ""
@@ -61,12 +66,21 @@ class Settings(BaseSettings):
     def journal_path(self) -> Path:
         return DATA_DIR / "journal.db"
 
+    @property
+    def token_cache_path(self) -> Path:
+        return DATA_DIR / ".token.json"
+
+    @property
+    def can_self_renew_token(self) -> bool:
+        return bool(self.dhan_client_id and self.dhan_pin and self.dhan_totp_secret)
+
     def missing_credentials(self) -> list[str]:
+        """A token source is either a static token or PIN + TOTP."""
         missing = []
         if not self.dhan_client_id:
             missing.append("DHAN_CLIENT_ID")
-        if not self.dhan_access_token:
-            missing.append("DHAN_ACCESS_TOKEN")
+        if not self.dhan_access_token and not self.can_self_renew_token:
+            missing.append("DHAN_ACCESS_TOKEN (or DHAN_PIN + DHAN_TOTP_SECRET)")
         return missing
 
 

@@ -37,6 +37,7 @@ from ..constants import (
     TransactionType,
 )
 from ..models import Candle, Instrument, Order, OrderIntent, Position
+from .auth import AuthError, TokenManager
 
 IST_TZ = ZoneInfo(IST)
 
@@ -89,7 +90,7 @@ class DhanClient:
     def __init__(
         self,
         client_id: str,
-        access_token: str,
+        access_token: str | TokenManager,
         *,
         order_proxy: str | None = None,
         proxy_data_calls: bool = False,
@@ -98,10 +99,22 @@ class DhanClient:
         max_orders_per_day: int = 500,
     ) -> None:
         self.client_id = str(client_id)
+
+        # A TokenManager can mint a fresh token; a bare string cannot and will
+        # stop working within 24 hours. Either is accepted so one-off commands
+        # stay simple, but `orbot run` should always be given the manager.
+        if isinstance(access_token, TokenManager):
+            self._tokens: TokenManager | None = access_token
+            initial = access_token.info.token if access_token.info else ""
+        else:
+            self._tokens = None
+            initial = access_token
+        self._current_token = initial
+
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "access-token": access_token,
+            "access-token": initial,
             "client-id": self.client_id,
         }
         self._data = httpx.Client(
@@ -131,8 +144,29 @@ class DhanClient:
     def _client_for(self, path: str) -> httpx.Client:
         return self._orders if path.startswith(_ORDER_ROUTES) else self._data
 
+    def _ensure_token(self) -> None:
+        """Refresh the auth header if the managed token has rotated.
+
+        Called before every request rather than on a 401. Reacting to a 401
+        would mean the first call after expiry fails, and if that call is an
+        order placement its outcome becomes ambiguous — the one failure mode
+        this client is built to avoid.
+        """
+        if self._tokens is None:
+            return
+        try:
+            token = self._tokens.token()
+        except AuthError as exc:
+            raise DhanAPIError(f"no usable access token: {exc}") from exc
+        if token == self._current_token:
+            return
+        self._current_token = token
+        for client in {id(self._data): self._data, id(self._orders): self._orders}.values():
+            client.headers["access-token"] = token
+
     def _request(self, method: str, path: str, *, json: Any = None,
                  retries: int = 2) -> Any:
+        self._ensure_token()
         client = self._client_for(path)
         last: Exception | None = None
         for attempt in range(retries + 1):
