@@ -581,6 +581,8 @@ def signals(
                                             help="Override the plan's timeframe"),
     days: int = typer.Option(30, "--days", "-d"),
     show: int = typer.Option(40, "--show", "-n", help="0 for all"),
+    by_day: bool = typer.Option(False, "--by-day", "-D",
+                                help="One line per session, for chart comparison"),
     csv_out: Optional[str] = typer.Option(None, "--csv", help="Write signals to a CSV"),
 ) -> None:
     """Replay history through the strategy and list every signal it produces.
@@ -634,6 +636,12 @@ def signals(
         console.print(f"[yellow]filters active — {raw} raw signals reduced to "
                       f"{len(found)}[/yellow]")
 
+    if by_day:
+        _print_by_day(found)
+        if csv_out:
+            _write_signal_csv(found, Path(csv_out))
+        return
+
     rows = found if show == 0 else found[-show:]
     table = Table(title=f"signals (showing {len(rows)} of {len(found)})")
     for col in ("bar timestamp (IST)", "action", "price", "ut stop", "atr",
@@ -669,6 +677,72 @@ def signals(
     console.print("\n[dim]Compare these timestamps against the Buy/Sell labels on "
                   "your TradingView chart. Any mismatch must be resolved before "
                   "going live.[/dim]")
+
+
+def _print_by_day(signals) -> None:
+    """One line per session — the practical way to check against a chart.
+
+    Scroll the chart to a date, count the Buy/Sell labels, and compare the
+    sequence. A whole session either matches or it does not, which finds a
+    systematic error far faster than walking 200 rows.
+
+    Signals in the two zones known to be data-sensitive are marked, so a
+    mismatch there can be discounted rather than chased as a porting bug.
+    """
+    import datetime as _dt
+
+    by_date: dict[object, list] = {}
+    for sig in signals:
+        by_date.setdefault(sig.bar_ts.date(), []).append(sig)
+
+    table = Table(title=f"signals by session ({len(signals)} total, "
+                        f"{len(by_date)} sessions)")
+    table.add_column("date")
+    table.add_column("n", justify="right")
+    table.add_column("sequence  (* = data-sensitive, discount a mismatch here)")
+
+    open_marked = late_marked = 0
+    for day in sorted(by_date):
+        parts = []
+        for sig in sorted(by_date[day], key=lambda s: s.bar_ts):
+            clock = sig.bar_ts.strftime("%H:%M")
+            risky = sig.bar_ts.time() <= _dt.time(9, 15) or                 sig.bar_ts.time() >= _dt.time(15, 10)
+            if risky:
+                if sig.bar_ts.time() <= _dt.time(9, 15):
+                    open_marked += 1
+                else:
+                    late_marked += 1
+            colour = "green" if sig.action == Action.BUY else "red"
+            mark = "*" if risky else ""
+            parts.append(f"[{colour}]{sig.action[0]}[/{colour}]{clock}{mark}")
+        table.add_row(day.strftime("%Y-%m-%d  %a"), str(len(by_date[day])),
+                      "  ".join(parts))
+    console.print(table)
+
+    clean = len(signals) - open_marked - late_marked
+    console.print("")
+    console.print(f"[bold]{clean}[/bold] signals sit on clean mid-session data "
+                  f"— these must match exactly.")
+    console.print(f"[dim]{open_marked} at the open (overnight gap dominates ATR; "
+                  f"differs if your chart includes pre-open), "
+                  f"{late_marked} after 15:10 (Angel drops the 15:20 bar, and "
+                  f"square-off blocks these anyway).[/dim]")
+
+
+def _write_signal_csv(signals, path: Path) -> None:
+    import csv as _csv
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = _csv.writer(fh)
+        writer.writerow(["bar_ts", "date", "time", "action", "price", "ut_stop",
+                         "atr", "hma", "orb_high", "orb_low"])
+        for sig in signals:
+            m = sig.meta
+            writer.writerow([sig.bar_ts.isoformat(), sig.bar_ts.date(),
+                             sig.bar_ts.strftime("%H:%M"), sig.action, sig.price,
+                             m.get("stop"), m.get("atr"), m.get("hma"),
+                             m.get("orb_high"), m.get("orb_low")])
+    console.print(f"[green]wrote[/green] {len(signals)} signals -> {path}")
 
 
 def _report_data_quality(candles, tf: Timeframe) -> None:
