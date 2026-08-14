@@ -133,6 +133,61 @@ def build_state() -> dict[str, Any]:
     return state
 
 
+def health() -> dict[str, Any]:
+    """Operational vitals. Separate from state because these answer "is the
+    machinery alive", not "what did it do" — and it is the first thing you want
+    when nothing is happening and you cannot tell whether that is correct."""
+    settings = get_settings()
+    calendar = MarketCalendar.load(CONFIG_DIR / "calendar.yaml")
+    now = dt.datetime.now(IST_TZ)
+    out: dict[str, Any] = {
+        "market_open": calendar.is_open(now),
+        "market": calendar.describe(now),
+        "minutes_to_close": round(calendar.minutes_to_close(now), 1),
+        "static_ip_proxy": bool(settings.dhan_order_proxy),
+        "token": "unknown",
+        "token_ok": False,
+        "last_run": None,
+        "last_signal": None,
+        "last_guard": None,
+    }
+    try:
+        if settings.broker == "angel":
+            out["token_ok"] = settings.can_self_renew_angel
+            out["token"] = ("self-renewing via TOTP" if settings.can_self_renew_angel
+                            else "no TOTP — will need a manual login")
+        else:
+            from ..broker.auth import TokenManager
+            tm = TokenManager(settings.dhan_client_id,
+                              static_token=settings.dhan_access_token,
+                              pin=settings.dhan_pin,
+                              totp_secret=settings.dhan_totp_secret,
+                              cache_path=settings.token_cache_path)
+            out["token_ok"] = tm.can_self_renew
+            out["token"] = tm.describe()
+    except Exception as exc:
+        out["token"] = f"unreadable: {exc}"
+
+    conn = _journal(settings.journal_path)
+    if conn is not None:
+        try:
+            runs = _rows(conn, "SELECT started_at, ended_at, mode FROM runs"
+                               " ORDER BY id DESC LIMIT 1")
+            if runs:
+                out["last_run"] = runs[0]
+            sig = _rows(conn, "SELECT bar_ts, action, plan FROM signals"
+                              " ORDER BY id DESC LIMIT 1")
+            if sig:
+                out["last_signal"] = sig[0]
+            gd = _rows(conn, "SELECT guard, detail, created_at FROM guard_events"
+                             " ORDER BY id DESC LIMIT 1")
+            if gd:
+                out["last_guard"] = gd[0]
+        finally:
+            conn.close()
+    return out
+
+
 def chart_payload(plan_name: str, bars: int = 1500,
                   overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     """Candles plus the indicator overlays, so the chart shows exactly what the
@@ -301,6 +356,54 @@ def apply_params(changes: dict[str, Any], *, dry_run: bool = True) -> dict[str, 
     return {"diff": diff, "applied": True, "backup": str(backup)}
 
 
+def set_plan_enabled(plan_name: str, enabled: bool, *,
+                     dry_run: bool = True) -> dict[str, Any]:
+    """Flip `enabled` on one plan in instruments.yaml.
+
+    Same surgical approach as apply_params, and for the same reason: a YAML
+    round trip would strip the comments. Only the `enabled:` line that follows
+    the matching `- name:` is touched, so no other plan can be altered by a
+    mistargeted edit.
+    """
+    path = CONFIG_DIR / "instruments.yaml"
+    if not path.exists():
+        return {"error": "config/instruments.yaml not found"}
+    original = path.read_text(encoding="utf-8")
+    lines = original.splitlines(keepends=True)
+
+    out, found, armed = [], False, False
+    for raw in lines:
+        stripped = raw.split("#", 1)[0].strip()
+        if stripped.startswith("- name:"):
+            armed = stripped.split(":", 1)[1].strip().strip("\"'") == plan_name
+        elif armed and stripped.startswith("enabled:"):
+            current = stripped.split(":", 1)[1].strip()
+            want = "true" if enabled else "false"
+            if current != want:
+                indent = raw[: len(raw) - len(raw.lstrip())]
+                raw = f"{indent}enabled: {want}" + NEWLINE
+                found = True
+            armed = False
+        out.append(raw)
+
+    if not found:
+        return {"changed": False, "enabled": enabled,
+                "detail": f"{plan_name} already {'enabled' if enabled else 'disabled'}"}
+    if dry_run:
+        return {"changed": True, "enabled": enabled, "applied": False}
+
+    backup = path.with_suffix(".yaml.bak")
+    backup.write_text(original, encoding="utf-8")
+    path.write_text("".join(out), encoding="utf-8")
+    try:
+        load_plans()
+    except Exception as exc:
+        path.write_text(original, encoding="utf-8")
+        return {"error": f"change rejected, config restored: {exc}"}
+    return {"changed": True, "enabled": enabled, "applied": True,
+            "backup": str(backup)}
+
+
 def create_app(*, allow_control: bool = True):
     try:
         from fastapi import FastAPI, HTTPException
@@ -345,6 +448,64 @@ def create_app(*, allow_control: bool = True):
             raise HTTPException(403, "controls disabled")
         return apply_params(payload.get("params") or {},
                             dry_run=bool(payload.get("dry_run", True)))
+
+    @app.get("/api/health")
+    def health_endpoint() -> dict:
+        return health()
+
+    @app.get("/api/performance/{plan_name}")
+    def performance(plan_name: str, bars: int = 1500,
+                    model_options: bool = False) -> dict:
+        from .performance import performance_payload
+        return performance_payload(plan_name, bars=bars,
+                                   model_options=model_options)
+
+    @app.post("/api/plan/{plan_name}/enabled")
+    def plan_enabled(plan_name: str, payload: dict) -> dict:
+        if not allow_control:
+            raise HTTPException(403, "controls disabled")
+        return set_plan_enabled(plan_name, bool(payload.get("enabled")),
+                                dry_run=bool(payload.get("dry_run", True)))
+
+    @app.post("/api/flatten")
+    def flatten(payload: dict | None = None) -> dict:
+        """Close every open position. Risk-reducing only — there is deliberately
+        no order-entry endpoint, because a Buy button in a bot dashboard is the
+        fastest route to a position the bot does not know it holds."""
+        if not allow_control:
+            raise HTTPException(403, "controls disabled")
+        if not (payload or {}).get("confirm"):
+            raise HTTPException(400, "confirm required")
+        import asyncio
+
+        from ..broker.factory import build_broker
+        from ..execution.oms import build_oms
+        from ..ops.journal import Journal
+        from ..ops.notifier import build_notifier
+        from ..engine.runner import TradingEngine
+
+        settings = get_settings()
+        journal = Journal(settings.journal_path)
+        try:
+            bundle = build_broker(settings, refresh_instruments=False)
+            oms = build_oms(settings.trade_mode, bundle.client)
+            positions = oms.positions()
+            if not positions:
+                return {"closed": 0, "detail": "nothing open"}
+            engine = TradingEngine(
+                settings=settings, plans=load_plans(), risk=load_risk(),
+                registry=bundle.registry, client=bundle.client, oms=oms,
+                journal=journal,
+                notifier=build_notifier(settings.telegram_bot_token,
+                                        settings.telegram_chat_id),
+                killswitch=KillSwitch(HALT_FILE),
+                calendar=MarketCalendar.load(CONFIG_DIR / "calendar.yaml"),
+                feed_instrument=bundle.feed_instrument)
+            engine.book.adopt(positions)
+            asyncio.run(engine.flatten("flatten from the dashboard"))
+            return {"closed": len(positions)}
+        finally:
+            journal.close()
 
     @app.post("/api/halt")
     def halt() -> dict:

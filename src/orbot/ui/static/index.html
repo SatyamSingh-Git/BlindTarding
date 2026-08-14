@@ -103,6 +103,28 @@
   details.pg > summary{padding:8px 13px;cursor:pointer;font-size:11px;
        font-weight:650;letter-spacing:.7px;text-transform:uppercase;
        color:var(--dim);user-select:none;background:var(--panel-2)}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));
+        gap:1px;background:var(--line)}
+  .kpi{background:var(--panel);padding:9px 12px}
+  .kpi b{display:block;font-size:16px;font-weight:650;
+         font-family:ui-monospace,Consolas,monospace}
+  .kpi span{font-size:10px;color:var(--faint);text-transform:uppercase;
+            letter-spacing:.5px}
+  .health{display:flex;gap:16px;flex-wrap:wrap;padding:8px 13px;font-size:11.5px;
+          background:var(--panel-2);border-bottom:1px solid var(--line)}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;
+       margin-right:5px;vertical-align:middle}
+  .dot.ok{background:var(--up)} .dot.bad{background:var(--down)}
+  .dot.idle{background:var(--faint)}
+  #toasts{position:fixed;right:14px;bottom:14px;display:flex;flex-direction:column;
+          gap:8px;z-index:50}
+  .toast{background:var(--panel);border:1px solid var(--line);border-left:3px solid
+         var(--accent);border-radius:7px;padding:9px 13px;font-size:12px;
+         box-shadow:0 6px 20px rgba(0,0,0,.4);max-width:330px}
+  .toast.buy{border-left-color:var(--up)} .toast.sell{border-left-color:var(--down)}
+  .toast.warn{border-left-color:var(--warn)}
+  .caveat{padding:8px 13px;font-size:11.5px;color:var(--warn);
+          background:rgba(227,160,8,.08);border-bottom:1px solid var(--line)}
   .banner{padding:9px 13px;font-size:12px;border-bottom:1px solid var(--line)}
   .banner.warn{background:rgba(227,160,8,.1);color:var(--warn)}
   .banner.err{background:rgba(229,72,77,.12);color:var(--down)}
@@ -124,6 +146,7 @@
   <button id="haltBtn" class="danger">Arm kill switch</button>
 </header>
 
+<div class="health" id="health"></div>
 <div id="banner" style="display:none" class="banner warn"></div>
 
 <main>
@@ -189,6 +212,21 @@
     </div>
 
     <div class="panel" style="margin-top:13px">
+      <h2>Performance
+        <select id="perfMode">
+          <option value="points">index points</option>
+          <option value="options">modelled option P&amp;L</option>
+        </select>
+        <button id="perfModel" title="Fetch the actual option premium for each trade">
+          Model option leg</button>
+        <span class="note" id="perfNote"></span></h2>
+      <div class="caveat" id="perfCaveat"></div>
+      <div class="kpis" id="perfKpis"></div>
+      <canvas id="equity" style="height:150px"></canvas>
+      <div class="scroll" style="max-height:200px"><table id="trades"></table></div>
+    </div>
+
+    <div class="panel" style="margin-top:13px">
       <h2>Signals <span class="note">most recent first</span></h2>
       <div class="scroll"><table id="signals"></table></div>
     </div>
@@ -208,11 +246,14 @@
       <div class="scroll"><table id="guards"></table></div>
     </div>
     <div class="panel" style="margin-top:13px">
-      <h2>Plans</h2>
+      <h2>Plans <span class="note">click to enable or disable</span>
+        <button id="flattenBtn" class="danger" style="margin-left:auto">
+          Flatten all</button></h2>
       <div class="scroll"><table id="plans"></table></div>
     </div>
   </div>
 </main>
+<div id="toasts"></div>
 
 <script src="/static/chart.js"></script>
 <script>
@@ -327,16 +368,21 @@ async function refresh(){
 
   table($("#plans"), ["plan","on","tf","execution","square off"], s.plans,
     r=>`<tr><td>${r.name}</td>
-      <td class="${r.enabled?'pos':'muted'}">${r.enabled?"yes":"no"}</td>
+      <td><button class="planToggle ${r.enabled?'good':''}" data-plan="${r.name}"
+          data-on="${r.enabled?1:0}" style="padding:2px 9px;font-size:11px">
+          ${r.enabled?"on":"off"}</button></td>
       <td class="mono">${r.timeframe}</td>
       <td class="muted">${r.mode}${r.underlying?" · "+r.underlying:""}</td>
       <td class="mono muted">${r.square_off}</td></tr>`);
+  document.querySelectorAll(".planToggle").forEach(b=>
+    b.addEventListener("click", onPlanToggle));
 
+  noticeNew(s);
   const pick = $("#planPick");
   if(pick.options.length !== s.plans.length){
     pick.innerHTML = s.plans.map(p=>`<option value="${p.name}">${p.name}</option>`).join("");
     if(!currentPlan && s.plans.length){ currentPlan = s.plans[0].name;
-      pgLoad().then(function(){ loadChart(); }); }
+      pgLoad().then(function(){ loadChart(); loadPerf(false); }); }
   }
 }
 
@@ -368,6 +414,177 @@ async function loadChart(withOverrides){
       + (d.gaps.length ? ` · ${d.gaps.length} data gaps` : "");
   }catch(e){ $("#chartNote").textContent = "chart unavailable"; }
 }
+
+
+// --- health strip --------------------------------------------------------
+async function loadHealth(){
+  let h;
+  try{ h = await (await fetch("/api/health")).json(); }catch(e){ return; }
+  const dot = ok => `<span class="dot ${ok?'ok':'bad'}"></span>`;
+  const idle = `<span class="dot idle"></span>`;
+  const run = h.last_run
+    ? (h.last_run.ended_at ? "stopped" : "running · " + h.last_run.mode)
+    : "never run";
+  $("#health").innerHTML =
+    `<span>${h.market_open?dot(true):idle}${h.market}</span>` +
+    `<span>${h.token_ok?dot(true):dot(false)}${h.token}</span>` +
+    `<span>${h.static_ip_proxy?dot(true):idle}` +
+      `${h.static_ip_proxy?"static-IP proxy":"no proxy — using this machine's IP"}</span>` +
+    `<span>${h.last_run && !h.last_run.ended_at ? dot(true) : idle}engine ${run}</span>` +
+    (h.last_signal ? `<span class="muted">last signal ${h.last_signal.action} ` +
+      `${hhmm(h.last_signal.bar_ts)}</span>` : "") +
+    (h.last_guard ? `<span class="muted">last block ${h.last_guard.guard}</span>` : "");
+}
+
+// --- toasts --------------------------------------------------------------
+let seenSignal = null, seenGuard = null, firstPoll = true;
+function toast(text, kind){
+  const el = document.createElement("div");
+  el.className = "toast " + (kind || "");
+  el.textContent = text;
+  $("#toasts").appendChild(el);
+  setTimeout(()=>el.remove(), 9000);
+}
+function noticeNew(s){
+  const sig = s.signals[0], gd = s.guards[0];
+  if(sig){
+    const key = sig.bar_ts + sig.action;
+    if(!firstPoll && seenSignal && key !== seenSignal)
+      toast(`${sig.action} ${sig.plan} @ ${fmt(sig.price)} (bar ${hhmm(sig.bar_ts)})`,
+            sig.action === "BUY" ? "buy" : "sell");
+    seenSignal = key;
+  }
+  if(gd){
+    const key = gd.created_at + gd.guard;
+    if(!firstPoll && seenGuard && key !== seenGuard)
+      toast(`blocked by ${gd.guard} — ${(gd.detail||"").slice(0,70)}`, "warn");
+    seenGuard = key;
+  }
+  firstPoll = false;
+}
+
+// --- performance ---------------------------------------------------------
+let perf = null;
+async function loadPerf(modelOptions){
+  if(!currentPlan) return;
+  $("#perfNote").textContent = modelOptions ? "fetching option premiums…" : "loading…";
+  try{
+    const q = modelOptions ? "&model_options=true" : "";
+    perf = await (await fetch(`/api/performance/${currentPlan}?bars=1500${q}`)).json();
+  }catch(e){ $("#perfNote").textContent = "unavailable"; return; }
+  if(perf.error){ $("#perfNote").textContent = perf.error; return; }
+  renderPerf();
+}
+
+function renderPerf(){
+  if(!perf) return;
+  const mode = $("#perfMode").value;
+  const d = perf[mode] || {available:false};
+  $("#perfNote").textContent =
+    `${perf.sessions} sessions · square-off ${perf.square_off} · ` +
+    `cap ${perf.max_trades_per_day}/day` +
+    (perf.modelled ? ` · ${perf.modelled} trades modelled` : "");
+
+  $("#perfCaveat").innerHTML = mode === "points"
+    ? "Index points measure <b>signal quality, not profit</b>. You trade options: "
+      + "a 50-point index move is not a 50-point premium move, and theta bleeds "
+      + "while you hold. Costs and slippage are not included."
+    : "Modelled from the resolved ATM contract's own historical closes. Still "
+      + "excludes spread, slippage, brokerage and taxes — treat as an upper bound.";
+
+  if(!d.available){
+    $("#perfKpis").innerHTML =
+      `<div class="kpi"><b class="muted">—</b><span>${mode==='options'
+        ? 'click Model option leg' : 'no closed trades'}</span></div>`;
+    $("#trades").innerHTML = ""; drawEquity([]); return;
+  }
+  const unit = mode === "points" ? "" : "₹";
+  const sign = v => (v>=0?"+":"") + unit + fmt(v, mode==="points"?1:0);
+  const cls = v => v>0?"pos":v<0?"neg":"";
+  $("#perfKpis").innerHTML = [
+    ["total", sign(d.total), cls(d.total)],
+    ["trades", d.trades, ""],
+    ["win rate", d.win_rate.toFixed(1)+"%", d.win_rate>=50?"pos":"neg"],
+    ["avg trade", sign(d.avg), cls(d.avg)],
+    ["avg win", sign(d.avg_win), "pos"],
+    ["avg loss", sign(d.avg_loss), "neg"],
+    ["profit factor", d.profit_factor===null?"—":d.profit_factor.toFixed(2),
+      (d.profit_factor||0)>=1?"pos":"neg"],
+    ["max drawdown", unit+fmt(d.max_drawdown, mode==="points"?1:0), "neg"],
+  ].map(([k,v,c])=>`<div class="kpi"><b class="${c}">${v}</b><span>${k}</span></div>`)
+   .join("");
+
+  drawEquity(d.curve || []);
+
+  const rows = (perf.trades||[]).slice().reverse();
+  table($("#trades"), ["entry","exit","pts","contract","₹"], rows, t=>`<tr>
+    <td class="mono">${dmy(t.entry_ts)} ${hhmm(t.entry_ts)}</td>
+    <td class="mono muted">${t.exit_ts?hhmm(t.exit_ts):"open"}${
+      t.exit_reason==="square-off"?' <span class="pill">SQ</span>':""}</td>
+    <td class="mono ${t.points>0?'pos':t.points<0?'neg':''}">${
+      t.points===null?"—":(t.points>0?"+":"")+fmt(t.points,1)}</td>
+    <td class="muted" style="font-size:11px">${t.contract||"—"}</td>
+    <td class="mono ${t.option_pnl>0?'pos':t.option_pnl<0?'neg':''}">${
+      t.option_pnl===null||t.option_pnl===undefined?"—"
+        :(t.option_pnl>0?"+":"")+fmt(t.option_pnl,0)}</td></tr>`);
+}
+
+function drawEquity(curve){
+  const cv = $("#equity"), g = cv.getContext("2d");
+  const dpr = window.devicePixelRatio||1, W = cv.clientWidth, H = 150;
+  cv.width = W*dpr; cv.height = H*dpr; g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,W,H);
+  if(curve.length < 2){
+    g.fillStyle="#5b6775"; g.font="12px system-ui"; g.textAlign="center";
+    g.fillText("no closed trades yet", W/2, H/2); return; }
+  const vals = curve.map(c=>c.equity);
+  let lo = Math.min(0, ...vals), hi = Math.max(0, ...vals);
+  const pad=(hi-lo)*0.12||1; lo-=pad; hi+=pad;
+  const X = i => 8 + i*((W-16)/(curve.length-1));
+  const Y = v => 10 + (hi-v)/(hi-lo)*(H-24);
+  // zero line
+  g.strokeStyle="rgba(91,103,117,.5)"; g.setLineDash([3,3]); g.lineWidth=1;
+  g.beginPath(); g.moveTo(8,Y(0)); g.lineTo(W-8,Y(0)); g.stroke(); g.setLineDash([]);
+  const end = vals[vals.length-1];
+  const col = end>=0 ? "#26a65b" : "#e5484d";
+  g.beginPath(); g.moveTo(X(0), Y(vals[0]));
+  curve.forEach((c,i)=>g.lineTo(X(i), Y(c.equity)));
+  g.lineTo(X(curve.length-1), Y(0)); g.lineTo(X(0), Y(0)); g.closePath();
+  g.fillStyle = end>=0 ? "rgba(38,166,91,.13)" : "rgba(229,72,77,.13)"; g.fill();
+  g.beginPath(); g.moveTo(X(0), Y(vals[0]));
+  curve.forEach((c,i)=>g.lineTo(X(i), Y(c.equity)));
+  g.strokeStyle=col; g.lineWidth=1.6; g.stroke();
+}
+
+$("#perfMode").addEventListener("change", renderPerf);
+$("#perfModel").addEventListener("click", ()=>loadPerf(true));
+
+// --- controls ------------------------------------------------------------
+async function onPlanToggle(e){
+  const btn = e.currentTarget;
+  const plan = btn.dataset.plan, want = btn.dataset.on === "1" ? false : true;
+  const verb = want ? "ENABLE" : "disable";
+  const extra = want ? "\n" + "\n" + "An enabled plan will place orders when the "
+    + "engine runs. Make sure the validation gate has passed for it." : "";
+  if(!confirm(`${verb} plan "${plan}"?${extra}`)) return;
+  const res = await (await fetch(`/api/plan/${plan}/enabled`, {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({enabled: want, dry_run: false})})).json();
+  if(res.error){ alert(res.error); return; }
+  toast(`${plan} ${want?"enabled":"disabled"}`, want?"warn":"");
+  refresh();
+}
+
+$("#flattenBtn").addEventListener("click", async ()=>{
+  if(!confirm("Close every open position now?" + "\n" + "\n" +
+      "This places real exit orders in live mode.")) return;
+  const res = await (await fetch("/api/flatten", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({confirm:true})})).json();
+  if(res.error){ alert(res.error); return; }
+  toast(res.detail || `flatten sent for ${res.closed} position(s)`, "warn");
+  refresh();
+});
 
 // --- parameter playground ------------------------------------------------
 let configured = null, baseCount = null, pgTimer = null;
@@ -456,7 +673,7 @@ $("#pgApply").addEventListener("click", async function(){
 
 $("#planPick").addEventListener("change", function(e){
   currentPlan = e.target.value; baseCount = null;
-  pgLoad().then(function(){ loadChart(); });
+  pgLoad().then(function(){ loadChart(); loadPerf(false); });
 });
 $("#zoomIn").addEventListener("click", ()=>chart.zoomBy(1/1.4));
 $("#zoomOut").addEventListener("click", ()=>chart.zoomBy(1.4));
@@ -471,13 +688,15 @@ const toggles = {tHma:"hma", tStop:"stop", tOrb:"orb", tSig:"signals", tGap:"gap
 Object.entries(toggles).forEach(([id,key])=>{
   $("#"+id).addEventListener("change", e=>chart.toggle(key, e.target.checked));
 });
-window.addEventListener("resize", ()=>chart.draw());
+window.addEventListener("resize", ()=>{ chart.draw(); renderPerf(); });
 window.addEventListener("keydown", e=>{
   if(e.key === "Escape" && chart.measureMode){ chart.setMeasureMode(false);
     $("#measureBtn").className=""; $("#measureOut").textContent=""; }
 });
 
-refresh(); setInterval(refresh, 3000);
+refresh(); loadHealth();
+setInterval(refresh, 2500);
+setInterval(loadHealth, 10000);
 setInterval(function(){ loadChart(true); }, 60000);
 </script>
 </body>
