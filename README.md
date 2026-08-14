@@ -37,10 +37,33 @@ Also worth knowing: the live chart runs **UT Key Value 3**, where the Pine
 source defaults to 2. And the ORB session is **10:10–10:15**, not the market
 open, despite the name.
 
+## Brokers
+
+Two adapters behind one interface, selected with `BROKER=dhan|angel`:
+
+| | Dhan | **Angel One SmartAPI** |
+|---|---|---|
+| Trading API | free | free |
+| Market data | ₹499 + GST/mo | **free** |
+| Native intraday intervals | 1, 5, 15, 25, 60m | **1, 3, 5, 10, 15, 30, 60m** |
+| Order idempotency | `correlationId` → exact lookup | none; recovery is heuristic |
+| Historical timestamps | bare epoch (ambiguous) | explicit `+05:30` |
+
+Angel's extra native intervals matter more than the money: a native interval's
+bars come from the exchange and can be checked against your chart directly,
+while anything resampled has boundaries *we* chose. Dhan's `correlationId` is
+the one place Dhan is clearly better — it turns "did my order go through?" into
+a lookup instead of a guess.
+
+**Switching brokers invalidates every `security_id` in your config.** Dhan's
+securityId and Angel's token are different numbers for the same contract, so a
+stale id resolves to a real but unrelated instrument. `orbot validate` refuses
+to run when it spots the other broker's ids.
+
 ## Design
 
-We do **not** read the TradingView chart. We recompute the indicator from
-Dhan's own tick feed.
+We do **not** read the TradingView chart. We recompute the indicator from the
+broker's own tick feed.
 
 | | TradingView webhook | Recompute locally (this repo) |
 |---|---|---|
@@ -70,7 +93,7 @@ futures and equities from config alone.
 ```bash
 pip install -e ".[dev]"
 cp .env.example .env          # fill in Dhan credentials
-pytest -q                     # 461 tests, no credentials needed
+pytest -q                     # 556 tests, no credentials needed
 
 orbot doctor                  # config, credentials, connectivity
 orbot token                   # token lifetime and whether it self-renews
@@ -193,19 +216,21 @@ available and will produce entries that vanish before the candle closes.
 
 ## Testing
 
-461 tests. Roughly a third are adversarial — the threat model is not an attacker,
+556 tests. Roughly a third are adversarial — the threat model is not an attacker,
 it's a bad afternoon: a truncated frame during a reconnect, a NaN from a stale
 contract, a volume counter reset at midnight, a CSV that changed shape
 overnight. Each of those can produce a *plausible* wrong number that gets
 traded on.
 
-The suite has caught seven real bugs so far: a malformed FULL packet layout,
+The suite has caught eight real bugs so far: a malformed FULL packet layout,
 non-finite prices reaching the candle engine, a NaN spot silently selecting a
 real-but-wrong strike, Dhan's `0001-01-01` null-expiry sentinel sorting ahead of
 every genuine expiry, a resampler that emitted bars spanning overnight gaps, and
 a fill ledger keyed on the order rather than the intent — which double-counted
-when two order attempts collided on a blank id — and a token cache that crashed
-the process at startup when it held valid JSON of the wrong shape.
+when two order attempts collided on a blank id — a token cache that crashed the
+process at startup when it held valid JSON of the wrong shape, and an Angel
+feed packet whose garbage timestamp raised `OSError` and would have killed the
+feed reader mid-session.
 
 ```bash
 pytest tests/test_adversarial.py -q

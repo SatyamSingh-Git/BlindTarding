@@ -12,6 +12,8 @@ data/*.csv
 data/*.db
 data/*.db-journal
 data/.token.json
+data/.angel_session.json
+data/*.json
 data/warmup/
 logs/
 HALT

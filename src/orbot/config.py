@@ -31,6 +31,12 @@ class Settings(BaseSettings):
         env_file=ROOT / ".env", env_file_encoding="utf-8", extra="ignore"
     )
 
+    # Which broker to trade through. Both adapters expose the same surface, so
+    # this is the only line that changes -- but see check_plan_ids(): the two
+    # brokers use DIFFERENT ids for the same contract, so plans must be
+    # re-resolved after a switch.
+    broker: Literal["dhan", "angel"] = "dhan"
+
     dhan_client_id: str = ""
     dhan_access_token: str = ""
 
@@ -43,6 +49,14 @@ class Settings(BaseSettings):
     # call direct, which only works if this machine's own IP is whitelisted.
     dhan_order_proxy: str = ""
     proxy_data_calls: bool = False
+
+    # --- Angel One SmartAPI ---------------------------------------------
+    # Free market data, and more native intraday intervals than Dhan.
+    # API key from smartapi.angelone.in (create an app -- free, self-serve).
+    angel_client_code: str = ""
+    angel_api_key: str = ""
+    angel_mpin: str = ""
+    angel_totp_secret: str = ""
 
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
@@ -71,12 +85,33 @@ class Settings(BaseSettings):
         return DATA_DIR / ".token.json"
 
     @property
+    def angel_scrip_master_path(self) -> Path:
+        return DATA_DIR / "angel_scrip_master.json"
+
+    @property
+    def angel_session_path(self) -> Path:
+        return DATA_DIR / ".angel_session.json"
+
+    @property
+    def can_self_renew_angel(self) -> bool:
+        return bool(self.angel_client_code and self.angel_api_key
+                    and self.angel_mpin and self.angel_totp_secret)
+
+    @property
     def can_self_renew_token(self) -> bool:
         return bool(self.dhan_client_id and self.dhan_pin and self.dhan_totp_secret)
 
     def missing_credentials(self) -> list[str]:
-        """A token source is either a static token or PIN + TOTP."""
+        """What is missing for the *configured* broker."""
         missing = []
+        if self.broker == "angel":
+            if not self.angel_client_code:
+                missing.append("ANGEL_CLIENT_CODE")
+            if not self.angel_api_key:
+                missing.append("ANGEL_API_KEY")
+            if not self.can_self_renew_angel:
+                missing.append("ANGEL_MPIN + ANGEL_TOTP_SECRET")
+            return missing
         if not self.dhan_client_id:
             missing.append("DHAN_CLIENT_ID")
         if not self.dhan_access_token and not self.can_self_renew_token:
