@@ -1,5 +1,12 @@
 # Does SVMKR_UT_HMA_ORB have a tradeable edge?
 
+> **SUPERSEDED IN PART — read [FINDINGS-2026-08-15.md](FINDINGS-2026-08-15.md) first.**
+>
+> Several gold figures below were computed on a contract that was illiquid for
+> part of the window, and are overstated. In particular the GOLD 5m two-week
+> result and the "2h works" conclusion both need the corrections in that
+> document. The silver results and the stop-loss analysis are only there.
+
 Tested across three instruments and four timeframes, on real broker data, with
 the chart-configured parameters (`ut_key 3, ATR 1, HMA 31`).
 

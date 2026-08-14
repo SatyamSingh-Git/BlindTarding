@@ -236,7 +236,13 @@ class Journal:
     def trades_today(self, plan: str | None = None,
                      *, day: dt.date | None = None) -> int:
         day = day or dt.datetime.now(IST_TZ).date()
-        sql = ("SELECT COUNT(*) AS n FROM orders WHERE date(created_at) = ?"
+        # `created_at` is an IST timestamp *with* its +05:30 offset, and
+        # SQLite's date() normalises such strings to UTC before truncating.
+        # date('2026-08-15T01:16+05:30') is therefore '2026-08-14', which made
+        # this counter read zero between midnight and 05:30 IST and would have
+        # reopened the daily trade cap in the small hours. Compare the IST date
+        # prefix directly instead of letting SQLite shift the timezone.
+        sql = ("SELECT COUNT(*) AS n FROM orders WHERE substr(created_at,1,10) = ?"
                " AND status IN ('TRADED','PART_TRADED','PENDING','TRANSIT')")
         args: list[Any] = [day.isoformat()]
         if plan:
