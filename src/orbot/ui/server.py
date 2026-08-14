@@ -503,9 +503,28 @@ def create_app(*, allow_control: bool = True):
     app = FastAPI(title="ORBot", docs_url=None, redoc_url=None)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
+    @app.middleware("http")
+    async def _no_store(request, call_next):
+        """Never let the browser cache this dashboard.
+
+        The page and its script change as the system is developed, and a
+        stale copy is worse than a slow one: it silently shows old numbers
+        and missing controls, which reads as a bug in the software rather
+        than in the cache.
+        """
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        return response
+
     @app.get("/", response_class=HTMLResponse)
-    def index() -> str:
-        return (STATIC / "index.html").read_text(encoding="utf-8")
+    def index() -> HTMLResponse:
+        # Cache-bust the script the same way, so a fresh page never pairs with
+        # a stale chart.js.
+        html = (STATIC / "index.html").read_text(encoding="utf-8")
+        stamp = int((STATIC / "chart.js").stat().st_mtime)
+        html = html.replace("/static/chart.js", f"/static/chart.js?v={stamp}")
+        return HTMLResponse(html)
 
     @app.get("/api/state")
     def state() -> dict:
