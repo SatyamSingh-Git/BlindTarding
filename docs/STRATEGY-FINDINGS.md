@@ -165,3 +165,50 @@ during the 09:00-23:30 session leaves a levered position open into that gap.
 
 That is the single strongest argument for the guard layer, the kill switch and
 the two-week paper run — not for the strategy.
+
+
+## The downtrend test — 7.5 years of daily gold
+
+Angel serves daily bars back to January 2019 on GOLDM, so this covers 1,869
+sessions and gold moving from Rs 31,950 to Rs 152,843.
+
+| side | trades | win rate | net (1 lot) | max DD |
+|---|---|---|---|---|
+| long | 44 | 47.7% | **+Rs 5,31,728** | Rs 1,19,890 |
+| short | 45 | 26.7% | −Rs 5,95,116 | Rs 6,80,720 |
+| both | 89 | 37.1% | −Rs 63,388 | Rs 3,83,230 |
+
+Long is profitable in **7 of 8 years**, losing only 2026 (−Rs 60,536). Short
+loses in 6 of 8. Trading both sides is net negative because the short leg
+destroys what the long leg earns — the same conclusion the 5-minute tests
+reached, now over seven years.
+
+On a Rs 2,00,000 account with 1 lot: final equity **Rs 7,32,330, +266%**, and it
+never breached the margin requirement. Buy-and-hold returned more absolutely
+(+Rs 12,08,930) with a Rs 3,18,470 drawdown that liquidates the account outright.
+
+### The question this did not answer
+
+**Gold rose in 7 of the 8 years, 378% in total. The only down year, 2021, fell
+4%.** There is no real gold bear market anywhere in the available data, so
+"does this survive a downtrend?" remains unanswered. What has been shown is that
+a leveraged long-only trend follower makes money in the largest gold bull run in
+decades, which is a much weaker claim.
+
+### Sequence risk
+
+The worst drawdown was Rs 1,20,473 — **60% of the starting capital**. It survived
+only because it arrived after gains had accumulated. The same drawdown in year
+one would have taken equity to Rs 79,527, below the Rs 92,400 margin, and the
+position would have been liquidated. Survival here is partly an accident of
+ordering, not a property of the strategy.
+
+## Bottom line
+
+Long only, GOLDM, one lot. Not two — two hits a margin call. Not the 1 kg GOLD
+contract — it needs Rs 9.24 lakh of margin. Not the short side — it loses on
+every instrument and timeframe tested. Not NIFTY options — the signal is
+inverted there and theta compounds the damage.
+
+And not with confidence that it works when gold falls, because nothing in the
+data says whether it does.
