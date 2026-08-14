@@ -19,6 +19,7 @@ Execution:
     orbot status            positions, P&L, halt state
     orbot flatten           close every open position
     orbot halt              arm the kill switch
+    orbot dashboard         local web UI: chart, positions, P&L, guards
 """
 
 from __future__ import annotations
@@ -809,6 +810,42 @@ def _fmt(value: object) -> str:
     if isinstance(value, (int, float)):
         return f"{value:,.2f}"
     return str(value)
+
+
+@app.command()
+def dashboard(
+    port: int = typer.Option(8777, "--port", "-p"),
+    host: str = typer.Option("127.0.0.1", "--host",
+                             help="Keep this on localhost unless you know why not"),
+    no_controls: bool = typer.Option(False, "--no-controls",
+                                     help="Read-only: disable the kill switch buttons"),
+) -> None:
+    """Open the local dashboard.
+
+    Reads the same SQLite journal the engine writes, so it shows what the bot
+    actually did rather than a second opinion. Runs alongside `orbot run`.
+
+    Bound to localhost by default on purpose: the page exposes positions, P&L
+    and a kill switch, none of which should be reachable from a network.
+    """
+    try:
+        import uvicorn
+    except ImportError:
+        console.print('[red]the dashboard needs FastAPI and uvicorn[/red]')
+        console.print('install with:  pip install -e ".[webhook]"')
+        raise typer.Exit(1) from None
+
+    from .ui.server import create_app
+
+    settings = get_settings()
+    console.print(f"[bold]ORBot dashboard[/bold] — broker {settings.broker}, "
+                  f"mode {settings.trade_mode}")
+    console.print(f"open [bold]http://{host}:{port}[/bold]   (Ctrl-C to stop)")
+    if host != "127.0.0.1":
+        console.print("[yellow]bound beyond localhost — anyone who can reach this "
+                      "port can see your positions and arm the kill switch[/yellow]")
+    uvicorn.run(create_app(allow_control=not no_controls),
+                host=host, port=port, log_level="warning")
 
 
 @app.command()

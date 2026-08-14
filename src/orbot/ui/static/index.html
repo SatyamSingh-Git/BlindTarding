@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ORBot</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#141b24; --panel-2:#1a232e; --line:#243040;
+    --text:#e6edf3; --dim:#8b98a8; --faint:#5b6775;
+    --up:#26a65b; --down:#e5484d; --accent:#4c8dff;
+    --warn:#e3a008; --live:#e5484d; --paper:#26a65b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:13px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+  .mono{font-family:ui-monospace,"Cascadia Code",Consolas,monospace;
+        font-variant-numeric:tabular-nums}
+
+  header{display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+         padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+  .brand{font-weight:650;letter-spacing:.3px;font-size:15px}
+  .badge{padding:3px 10px;border-radius:5px;font-weight:650;font-size:11px;
+         letter-spacing:.6px;text-transform:uppercase}
+  .badge.paper{background:rgba(38,166,91,.16);color:var(--paper);
+               border:1px solid rgba(38,166,91,.35)}
+  .badge.live{background:rgba(229,72,77,.16);color:var(--live);
+              border:1px solid rgba(229,72,77,.5);animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+  .badge.halt{background:rgba(229,72,77,.18);color:var(--live);
+              border:1px solid rgba(229,72,77,.5)}
+  .stat{display:flex;flex-direction:column;line-height:1.25}
+  .stat b{font-size:14px;font-weight:600}
+  .stat span{font-size:10.5px;color:var(--faint);text-transform:uppercase;
+             letter-spacing:.5px}
+  .spacer{flex:1}
+  button{font:inherit;font-weight:600;padding:7px 14px;border-radius:6px;
+         border:1px solid var(--line);background:var(--panel-2);color:var(--text);
+         cursor:pointer}
+  button:hover{border-color:var(--faint)}
+  button.danger{background:rgba(229,72,77,.14);border-color:rgba(229,72,77,.45);
+                color:var(--live)}
+  button.good{background:rgba(38,166,91,.14);border-color:rgba(38,166,91,.45);
+              color:var(--up)}
+
+  main{padding:14px;display:grid;gap:14px;
+       grid-template-columns:minmax(0,2.1fr) minmax(300px,1fr)}
+  @media(max-width:1100px){main{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+         overflow:hidden}
+  .panel > h2{margin:0;padding:9px 13px;font-size:11.5px;font-weight:650;
+              letter-spacing:.7px;text-transform:uppercase;color:var(--dim);
+              border-bottom:1px solid var(--line);
+              display:flex;align-items:center;gap:10px}
+  .panel > h2 .note{font-weight:400;letter-spacing:0;text-transform:none;
+                    color:var(--faint);font-size:11px}
+  .body{padding:11px 13px}
+  .scroll{max-height:264px;overflow:auto}
+
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th{position:sticky;top:0;background:var(--panel);text-align:left;
+     font-weight:600;color:var(--faint);font-size:10.5px;letter-spacing:.5px;
+     text-transform:uppercase;padding:6px 13px;border-bottom:1px solid var(--line)}
+  td{padding:6px 13px;border-bottom:1px solid rgba(36,48,64,.5)}
+  tr:last-child td{border-bottom:none}
+  .buy{color:var(--up);font-weight:650}
+  .sell{color:var(--down);font-weight:650}
+  .pos{color:var(--up)} .neg{color:var(--down)}
+  .muted{color:var(--faint)}
+  .pill{display:inline-block;padding:1px 7px;border-radius:4px;font-size:10.5px;
+        background:var(--panel-2);border:1px solid var(--line);color:var(--dim)}
+  .empty{padding:22px 13px;text-align:center;color:var(--faint);font-size:12px}
+
+  #chartWrap{position:relative;background:var(--panel)}
+  canvas{display:block;width:100%}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;padding:8px 13px;font-size:11px;
+          color:var(--dim);border-top:1px solid var(--line)}
+  .key{display:inline-flex;align-items:center;gap:5px}
+  .swatch{width:14px;height:2px;border-radius:2px;display:inline-block}
+  select{font:inherit;background:var(--panel-2);color:var(--text);
+         border:1px solid var(--line);border-radius:5px;padding:3px 7px}
+  .banner{padding:9px 13px;font-size:12px;border-bottom:1px solid var(--line)}
+  .banner.warn{background:rgba(227,160,8,.1);color:var(--warn)}
+  .banner.err{background:rgba(229,72,77,.12);color:var(--live)}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">ORBot</div>
+  <div id="modeBadge" class="badge paper">paper</div>
+  <div id="haltBadge" style="display:none" class="badge halt">halted</div>
+  <div class="stat"><b id="broker">—</b><span>broker</span></div>
+  <div class="stat"><b id="market">—</b><span>market</span></div>
+  <div class="stat"><b id="pnl" class="mono">—</b><span>p&amp;l today</span></div>
+  <div class="stat"><b id="trades" class="mono">—</b><span>trades</span></div>
+  <div class="stat"><b id="posCount" class="mono">—</b><span>positions</span></div>
+  <div class="spacer"></div>
+  <div class="stat" style="text-align:right"><b id="clock" class="mono">—</b>
+    <span id="freshness">connecting</span></div>
+  <button id="haltBtn" class="danger">Arm kill switch</button>
+</header>
+
+<div id="banner" style="display:none" class="banner warn"></div>
+
+<main>
+  <div>
+    <div class="panel">
+      <h2>
+        Chart
+        <select id="planPick"></select>
+        <span class="note" id="chartNote"></span>
+      </h2>
+      <div id="chartWrap"><canvas id="chart" height="430"></canvas></div>
+      <div class="legend">
+        <span class="key"><i class="swatch" style="background:#4c8dff"></i>Hull MA</span>
+        <span class="key"><i class="swatch" style="background:#8b98a8;
+              border-top:1px dashed #8b98a8;height:0"></i>UT stop</span>
+        <span class="key"><i class="swatch" style="background:#26a65b"></i>ORB high</span>
+        <span class="key"><i class="swatch" style="background:#e5484d"></i>ORB low</span>
+        <span class="key muted">▲ buy&nbsp;&nbsp;▼ sell</span>
+        <span class="key muted" id="barCount"></span>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:14px">
+      <h2>Signals <span class="note">most recent first</span></h2>
+      <div class="scroll"><table id="signals"></table></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h2>Positions <span class="note">last broker snapshot</span></h2>
+      <div class="scroll"><table id="positions"></table></div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <h2>Orders</h2>
+      <div class="scroll"><table id="orders"></table></div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <h2>Guard events <span class="note">why a signal was blocked</span></h2>
+      <div class="scroll"><table id="guards"></table></div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <h2>Plans</h2>
+      <div class="scroll"><table id="plans"></table></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const fmt = (n, d=2) => n===null||n===undefined||isNaN(n) ? "—"
+  : Number(n).toLocaleString("en-IN",{minimumFractionDigits:d,maximumFractionDigits:d});
+const hhmm = iso => { try{ return new Date(iso).toLocaleTimeString("en-IN",
+  {hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"Asia/Kolkata"}); }
+  catch(e){ return "—"; } };
+const dmy = iso => { try{ return new Date(iso).toLocaleDateString("en-IN",
+  {day:"2-digit",month:"short",timeZone:"Asia/Kolkata"}); } catch(e){ return ""; } };
+
+function table(el, cols, rows, render){
+  if(!rows.length){ el.innerHTML = `<tr><td class="empty" colspan="${cols.length}">
+    nothing yet</td></tr>`; return; }
+  el.innerHTML = "<thead><tr>" + cols.map(c=>`<th>${c}</th>`).join("")
+    + "</tr></thead><tbody>" + rows.map(render).join("") + "</tbody>";
+}
+
+let currentPlan = null, chartData = null;
+
+async function refresh(){
+  let s;
+  try { s = await (await fetch("/api/state")).json(); }
+  catch(e){ $("#freshness").textContent = "disconnected"; return; }
+
+  $("#broker").textContent = s.broker;
+  $("#market").textContent = s.market_open ? "open" : "closed";
+  $("#market").className = s.market_open ? "pos" : "muted";
+  $("#trades").textContent = s.trades_today;
+  $("#posCount").textContent = s.positions.length;
+  $("#clock").textContent = hhmm(s.now);
+  $("#freshness").textContent = "live · " + s.market;
+
+  const badge = $("#modeBadge");
+  badge.textContent = s.mode;
+  badge.className = "badge " + (s.is_live ? "live" : "paper");
+
+  const total = (s.realised||0) + (s.unrealised||0);
+  const p = $("#pnl");
+  p.textContent = "₹" + fmt(total, 0);
+  p.className = "mono " + (total > 0 ? "pos" : total < 0 ? "neg" : "");
+
+  $("#haltBadge").style.display = s.halted ? "" : "none";
+  const btn = $("#haltBtn");
+  btn.textContent = s.halted ? "Clear kill switch" : "Arm kill switch";
+  btn.className = s.halted ? "good" : "danger";
+
+  const b = $("#banner");
+  if(s.halted){
+    b.style.display=""; b.className="banner err";
+    b.textContent = "TRADING HALTED — " + (s.halt_reason || "") +
+      "  (via " + s.halt_source + "). No new orders will be placed.";
+  } else if(!s.journal){
+    b.style.display=""; b.className="banner warn";
+    b.textContent = "No journal yet — run the engine once (orbot run --mode paper) "
+      + "to start recording signals, orders and guard events.";
+  } else { b.style.display="none"; }
+
+  table($("#positions"), ["instrument","qty","avg","unrealised"], s.positions,
+    r=>`<tr><td class="mono">${r.security_id}<span class="pill"
+        style="margin-left:6px">${r.segment}</span></td>
+      <td class="mono ${r.net_qty>0?'pos':'neg'}">${r.net_qty>0?"+":""}${r.net_qty}</td>
+      <td class="mono">${fmt(r.avg_price)}</td>
+      <td class="mono ${r.unrealised>=0?'pos':'neg'}">${fmt(r.unrealised,0)}</td></tr>`);
+
+  table($("#signals"), ["bar","plan","action","price","stop","atr"], s.signals,
+    r=>`<tr><td class="mono">${dmy(r.bar_ts)} ${hhmm(r.bar_ts)}</td>
+      <td class="muted">${r.plan}</td>
+      <td class="${r.action==='BUY'?'buy':'sell'}">${r.action}</td>
+      <td class="mono">${fmt(r.price)}</td>
+      <td class="mono muted">${fmt(r.meta?.stop)}</td>
+      <td class="mono muted">${fmt(r.meta?.atr)}</td></tr>`);
+
+  table($("#orders"), ["time","instrument","side","qty","avg","status"], s.orders,
+    r=>`<tr><td class="mono">${hhmm(r.created_at)}</td>
+      <td>${r.display_name||r.security_id}</td>
+      <td class="${r.transaction_type==='BUY'?'buy':'sell'}">${r.transaction_type}</td>
+      <td class="mono">${r.filled_qty||0}/${r.quantity}</td>
+      <td class="mono">${fmt(r.avg_price)}</td>
+      <td><span class="pill">${r.status}</span></td></tr>`);
+
+  table($("#guards"), ["time","guard","detail"], s.guards,
+    r=>`<tr><td class="mono">${hhmm(r.created_at)}</td>
+      <td class="${r.allowed?'':'sell'}">${r.guard}</td>
+      <td class="muted">${(r.detail||"").slice(0,90)}</td></tr>`);
+
+  table($("#plans"), ["plan","on","tf","execution","square off"], s.plans,
+    r=>`<tr><td>${r.name}</td>
+      <td class="${r.enabled?'pos':'muted'}">${r.enabled?"yes":"no"}</td>
+      <td class="mono">${r.timeframe}</td>
+      <td class="muted">${r.mode}${r.underlying?" · "+r.underlying:""}</td>
+      <td class="mono muted">${r.square_off}</td></tr>`);
+
+  const pick = $("#planPick");
+  if(pick.options.length !== s.plans.length){
+    pick.innerHTML = s.plans.map(p=>`<option value="${p.name}">${p.name}</option>`).join("");
+    if(!currentPlan && s.plans.length){ currentPlan = s.plans[0].name; loadChart(); }
+  }
+}
+
+async function loadChart(){
+  if(!currentPlan) return;
+  $("#chartNote").textContent = "loading…";
+  try{
+    const d = await (await fetch(`/api/chart/${currentPlan}?bars=240`)).json();
+    if(d.error){ $("#chartNote").textContent = d.error; return; }
+    chartData = d;
+    $("#chartNote").textContent = `${d.instrument} · ${d.timeframe}`
+      + (d.native ? "" : " · resampled, verify against the chart");
+    $("#barCount").textContent = d.bars.length + " bars";
+    draw();
+  }catch(e){ $("#chartNote").textContent = "chart unavailable"; }
+}
+
+function draw(){
+  const c = $("#chart"), d = chartData;
+  if(!d || !d.bars.length) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = c.clientWidth, H = 430;
+  c.width = W*dpr; c.height = H*dpr;
+  const g = c.getContext("2d"); g.scale(dpr,dpr);
+  g.clearRect(0,0,W,H);
+
+  const padL=8, padR=68, padT=12, padB=26;
+  const bars = d.bars, n = bars.length;
+  const vals = [];
+  for(const b of bars){ vals.push(b.h,b.l);
+    if(b.hma!=null) vals.push(b.hma);
+    if(b.stop!=null) vals.push(b.stop); }
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = (hi-lo)*0.06 || 1; lo-=pad; hi+=pad;
+  const X = i => padL + (i+0.5)*((W-padL-padR)/n);
+  const Y = v => padT + (hi-v)/(hi-lo)*(H-padT-padB);
+  const bw = Math.max(1.4, (W-padL-padR)/n*0.62);
+
+  // grid + price axis
+  g.font = "11px ui-monospace,Consolas,monospace"; g.textBaseline="middle";
+  for(let k=0;k<=5;k++){
+    const v = lo + (hi-lo)*k/5, y = Y(v);
+    g.strokeStyle="rgba(36,48,64,.55)"; g.lineWidth=1;
+    g.beginPath(); g.moveTo(padL,y); g.lineTo(W-padR,y); g.stroke();
+    g.fillStyle="#5b6775"; g.textAlign="left";
+    g.fillText(v.toLocaleString("en-IN",{maximumFractionDigits:0}), W-padR+7, y);
+  }
+  // session dividers + time axis
+  g.textAlign="center"; g.textBaseline="top";
+  let lastDay=null;
+  bars.forEach((b,i)=>{
+    const day = b.t.slice(0,10);
+    if(lastDay && day!==lastDay){
+      g.strokeStyle="rgba(91,103,117,.4)"; g.setLineDash([3,3]);
+      g.beginPath(); g.moveTo(X(i),padT); g.lineTo(X(i),H-padB); g.stroke();
+      g.setLineDash([]);
+      g.fillStyle="#5b6775";
+      g.fillText(new Date(b.t).toLocaleDateString("en-IN",
+        {day:"2-digit",month:"short",timeZone:"Asia/Kolkata"}), X(i), H-padB+7);
+    }
+    lastDay = day;
+  });
+
+  const line = (key, colour, dash) => {
+    g.strokeStyle=colour; g.lineWidth=1.4; g.setLineDash(dash||[]);
+    g.beginPath(); let started=false;
+    bars.forEach((b,i)=>{ const v=b[key];
+      if(v==null){ started=false; return; }
+      if(!started){ g.moveTo(X(i),Y(v)); started=true; } else g.lineTo(X(i),Y(v)); });
+    g.stroke(); g.setLineDash([]);
+  };
+  line("orb_high","rgba(38,166,91,.75)");
+  line("orb_low","rgba(229,72,77,.75)");
+  line("stop","rgba(139,152,168,.85)",[4,3]);
+
+  // candles
+  bars.forEach((b,i)=>{
+    const up = b.c >= b.o, col = up ? "#26a65b" : "#e5484d";
+    g.strokeStyle=col; g.fillStyle=col; g.lineWidth=1;
+    g.beginPath(); g.moveTo(X(i),Y(b.h)); g.lineTo(X(i),Y(b.l)); g.stroke();
+    const y1=Y(b.o), y2=Y(b.c);
+    g.fillRect(X(i)-bw/2, Math.min(y1,y2), bw, Math.max(1.2,Math.abs(y2-y1)));
+  });
+
+  line("hma","#4c8dff");
+
+  // signal markers
+  bars.forEach((b,i)=>{
+    if(!b.buy && !b.sell) return;
+    const up=b.buy, y = up ? Y(b.l)+11 : Y(b.h)-11;
+    g.fillStyle = up ? "#26a65b" : "#e5484d";
+    g.beginPath();
+    if(up){ g.moveTo(X(i),y-7); g.lineTo(X(i)-5.5,y+2); g.lineTo(X(i)+5.5,y+2); }
+    else  { g.moveTo(X(i),y+7); g.lineTo(X(i)-5.5,y-2); g.lineTo(X(i)+5.5,y-2); }
+    g.closePath(); g.fill();
+  });
+
+  // last price tag
+  const last = bars[n-1];
+  g.fillStyle = last.c>=last.o ? "#26a65b" : "#e5484d";
+  g.fillRect(W-padR+2, Y(last.c)-9, padR-6, 18);
+  g.fillStyle="#08111a"; g.textAlign="left"; g.textBaseline="middle";
+  g.font="600 11px ui-monospace,Consolas,monospace";
+  g.fillText(last.c.toLocaleString("en-IN",{maximumFractionDigits:2}),
+             W-padR+7, Y(last.c));
+}
+
+$("#planPick").addEventListener("change", e=>{ currentPlan=e.target.value; loadChart(); });
+$("#haltBtn").addEventListener("click", async ()=>{
+  const halted = $("#haltBadge").style.display !== "none";
+  if(!halted && !confirm("Arm the kill switch? No new orders will be placed "
+      + "until you clear it.")) return;
+  await fetch(halted ? "/api/resume" : "/api/halt", {method:"POST"});
+  refresh();
+});
+window.addEventListener("resize", ()=>draw());
+
+refresh(); setInterval(refresh, 3000);
+setInterval(loadChart, 30000);
+</script>
+</body>
+</html>
