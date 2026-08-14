@@ -267,7 +267,22 @@
     </div>
 
     <div class="panel" style="margin-top:13px">
-      <h2>Performance
+      <h2>Backtest
+        <select id="perfPeriod">
+          <option value="today">today</option>
+          <option value="2d">last 2 days</option>
+          <option value="3d">last 3 days</option>
+          <option value="1w">1 week</option>
+          <option value="2w">2 weeks</option>
+          <option value="1m">1 month</option>
+          <option value="3m">3 months</option>
+          <option value="all" selected>all data</option>
+        </select>
+        <select id="perfDir">
+          <option value="long">long only (BUY→SELL)</option>
+          <option value="short">short only (SELL→BUY)</option>
+          <option value="both">both sides (always in)</option>
+        </select>
         <select id="perfMode">
           <option value="points">index points</option>
           <option value="options">modelled option P&amp;L</option>
@@ -275,6 +290,7 @@
         <button id="perfModel" title="Fetch the actual option premium for each trade">
           Model option leg</button>
         <span class="note" id="perfNote"></span></h2>
+      <table id="sides" style="border-bottom:1px solid var(--line)"></table>
       <div class="caveat" id="perfCaveat"></div>
       <div class="kpis" id="perfKpis"></div>
       <canvas id="equity" style="height:150px"></canvas>
@@ -611,7 +627,9 @@ async function loadPerf(modelOptions){
   $("#perfNote").textContent = modelOptions ? "fetching option premiums…" : "loading…";
   try{
     const q = modelOptions ? "&model_options=true" : "";
-    perf = await (await fetch(`/api/performance/${currentPlan}?bars=1500${q}`)).json();
+    const period = $("#perfPeriod").value, dir = $("#perfDir").value;
+    perf = await (await fetch(`/api/performance/${currentPlan}` +
+      `?bars=1500&period=${period}&direction=${dir}${q}`)).json();
   }catch(e){ $("#perfNote").textContent = "unavailable"; return; }
   if(perf.error){ $("#perfNote").textContent = perf.error; return; }
   renderPerf();
@@ -622,9 +640,29 @@ function renderPerf(){
   const mode = $("#perfMode").value;
   const d = perf[mode] || {available:false};
   $("#perfNote").textContent =
-    `${perf.sessions} sessions · square-off ${perf.square_off} · ` +
-    `cap ${perf.max_trades_per_day}/day` +
+    `${perf.sessions} session${perf.sessions===1?"":"s"} · ` +
+    (perf.from ? dmy(perf.from) + " → " + dmy(perf.to) + " · " : "") +
+    `square-off ${perf.square_off} · cap ${perf.max_trades_per_day}/day` +
     (perf.modelled ? ` · ${perf.modelled} trades modelled` : "");
+
+  // Side-by-side, because "would trading both directions help?" is only
+  // answerable by seeing all three at once.
+  const sides = perf.sides || {};
+  table($("#sides"), ["side","trades","win %","total pts","profit factor","max DD"],
+    ["long","short","both"].filter(k=>sides[k] && sides[k].available),
+    k=>{
+      const v = sides[k];
+      const on = k === $("#perfDir").value;
+      const label = {long:"long only", short:"short only", both:"both sides"}[k];
+      return `<tr style="${on?'background:rgba(76,141,255,.08)':''}">
+        <td>${on?"<b>"+label+"</b>":label}</td>
+        <td class="mono">${v.trades}</td>
+        <td class="mono ${v.win_rate>=50?'pos':''}">${v.win_rate.toFixed(1)}%</td>
+        <td class="mono ${v.total>=0?'pos':'neg'}">${v.total>=0?"+":""}${fmt(v.total,1)}</td>
+        <td class="mono ${(v.profit_factor||0)>=1?'pos':'neg'}">${
+          v.profit_factor===null?"∞":v.profit_factor.toFixed(2)}</td>
+        <td class="mono neg">${fmt(v.max_drawdown,0)}</td></tr>`;
+    });
 
   $("#perfCaveat").innerHTML = mode === "points"
     ? "Index points measure <b>signal quality, not profit</b>. You trade options: "
@@ -659,7 +697,8 @@ function renderPerf(){
 
   const rows = (perf.trades||[]).slice().reverse();
   table($("#trades"), ["entry","exit","pts","contract","₹"], rows, t=>`<tr>
-    <td class="mono">${dmy(t.entry_ts)} ${hhmm(t.entry_ts)}</td>
+    <td class="mono">${dmy(t.entry_ts)} ${hhmm(t.entry_ts)}
+      <span class="pill ${t.side==='long'?'':'sell'}">${t.side==='long'?'L':'S'}</span></td>
     <td class="mono muted">${t.exit_ts?hhmm(t.exit_ts):"open"}${
       t.exit_reason==="square-off"?' <span class="pill">SQ</span>':""}</td>
     <td class="mono ${t.points>0?'pos':t.points<0?'neg':''}">${
@@ -698,6 +737,8 @@ function drawEquity(curve){
 }
 
 $("#perfMode").addEventListener("change", renderPerf);
+$("#perfPeriod").addEventListener("change", ()=>loadPerf(false));
+$("#perfDir").addEventListener("change", ()=>loadPerf(false));
 $("#perfModel").addEventListener("click", ()=>loadPerf(true));
 
 // --- controls ------------------------------------------------------------

@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     telegram_chat_id: str = ""
 
     trade_mode: Literal["paper", "live"] = "paper"
+    # Fake money for paper mode. Nothing is deposited anywhere; this is the
+    # starting balance the simulated broker hands out, so the funds guard and
+    # position sizing behave the way they will with real capital.
+    paper_capital: float = 200_000.0
+    paper_slippage_pct: float = 0.05
     log_level: str = "INFO"
 
     # Local safety caps, deliberately far below Dhan's 25/sec and 7000/day.

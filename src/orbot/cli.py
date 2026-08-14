@@ -891,7 +891,9 @@ def _build_context(mode: str | None = None):
             max_orders_per_second=settings.max_orders_per_second,
             max_orders_per_day=settings.max_orders_per_day,
         )
-    oms = build_oms(settings.trade_mode, client)
+    oms = build_oms(settings.trade_mode, client,
+                    starting_funds=settings.paper_capital,
+                    slippage_pct=settings.paper_slippage_pct)
     engine = TradingEngine(
         settings=settings, plans=plans_cfg, risk=risk, registry=registry,
         client=client, oms=oms, journal=journal, notifier=notifier,

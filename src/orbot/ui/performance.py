@@ -37,6 +37,7 @@ IST_TZ = ZoneInfo(IST)
 class Trade:
     entry_ts: dt.datetime
     entry_price: float
+    side: str = "long"
     exit_ts: dt.datetime | None = None
     exit_price: float | None = None
     exit_reason: str = ""
@@ -47,11 +48,16 @@ class Trade:
     lot_size: int = 0
     quantity: int = 0
 
+    def close(self, ts: dt.datetime, price: float, reason: str) -> None:
+        self.exit_ts, self.exit_price, self.exit_reason = ts, price, reason
+
     @property
     def points(self) -> float | None:
+        """Signed by side: a short profits when price falls."""
         if self.exit_price is None:
             return None
-        return self.exit_price - self.entry_price
+        move = self.exit_price - self.entry_price
+        return move if self.side == "long" else -move
 
     @property
     def option_pnl(self) -> float | None:
@@ -65,6 +71,7 @@ class Trade:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "side": self.side,
             "entry_ts": self.entry_ts.isoformat(),
             "entry_price": self.entry_price,
             "exit_ts": self.exit_ts.isoformat() if self.exit_ts else None,
@@ -80,47 +87,69 @@ class Trade:
         }
 
 
-def pair_trades(result, *, square_off: dt.time,
-                max_trades_per_day: int = 0) -> list[Trade]:
-    """BUY opens, the next SELL closes — the decided semantics for this strategy.
+def pair_trades(result, *, square_off: dt.time, max_trades_per_day: int = 0,
+                direction: str = "long", start: dt.datetime | None = None
+                ) -> list[Trade]:
+    """Pair signals into trades.
+
+    `direction` decides which side is taken:
+
+    * ``long``  — BUY opens, SELL closes. The configured behaviour.
+    * ``short`` — SELL opens a short, BUY closes it.
+    * ``both``  — always in the market: every signal closes one side and opens
+      the other. Two transactions per signal, which is what "sell twice, buy
+      twice" means in practice.
 
     Two guards are applied because they materially change which trades exist,
-    and a backtest that ignores them would describe a system you are not
-    running: no entry at or after the square-off cutoff, and any position still
-    open at the cutoff is closed there rather than carried.
+    and a backtest that ignored them would describe a system nobody is running:
+    no entry at or after the square-off cutoff, and anything still open at the
+    cutoff is closed there rather than carried overnight.
     """
     trades: list[Trade] = []
     open_trade: Trade | None = None
     per_day: dict[dt.date, int] = {}
+    want_long = direction in ("long", "both")
+    want_short = direction in ("short", "both")
 
     for i, ts in enumerate(result.timestamps):
+        if start is not None and ts < start:
+            continue
         day = ts.date()
         past_cutoff = ts.time() >= square_off
 
-        # Force the exit at the cutoff, whatever the signal says.
         if open_trade is not None and past_cutoff:
-            open_trade.exit_ts = ts
-            open_trade.exit_price = result.closes[i]
-            open_trade.exit_reason = "square-off"
+            open_trade.close(ts, result.closes[i], "square-off")
             trades.append(open_trade)
             open_trade = None
 
-        if result.sell[i] and open_trade is not None:
-            open_trade.exit_ts = ts
-            open_trade.exit_price = result.closes[i]
-            open_trade.exit_reason = "signal"
-            trades.append(open_trade)
-            open_trade = None
+        fired = "buy" if result.buy[i] else "sell" if result.sell[i] else None
+        if fired is None:
             continue
 
-        if result.buy[i] and open_trade is None and not past_cutoff:
-            if max_trades_per_day and per_day.get(day, 0) >= max_trades_per_day:
-                continue
-            per_day[day] = per_day.get(day, 0) + 1
-            open_trade = Trade(entry_ts=ts, entry_price=result.closes[i])
+        # Close whatever is open — this is the first of the two transactions.
+        if open_trade is not None:
+            closes_it = ((fired == "sell" and open_trade.side == "long")
+                         or (fired == "buy" and open_trade.side == "short"))
+            if closes_it:
+                open_trade.close(ts, result.closes[i], "signal")
+                trades.append(open_trade)
+                open_trade = None
+
+        if past_cutoff or open_trade is not None:
+            continue
+
+        side = "long" if fired == "buy" else "short"
+        if side == "long" and not want_long:
+            continue
+        if side == "short" and not want_short:
+            continue
+        if max_trades_per_day and per_day.get(day, 0) >= max_trades_per_day:
+            continue
+        per_day[day] = per_day.get(day, 0) + 1
+        open_trade = Trade(entry_ts=ts, entry_price=result.closes[i], side=side)
 
     if open_trade is not None:
-        trades.append(open_trade)      # still open at the end of the window
+        trades.append(open_trade)
     return trades
 
 
@@ -241,8 +270,30 @@ def model_option_leg(trades: list[Trade], plan, registry, client, *,
     return filled, notes
 
 
+PERIODS = {
+    "today": 1, "2d": 2, "3d": 3, "1w": 7, "2w": 14, "1m": 30, "3m": 90,
+    "all": None,
+}
+
+
+def _period_start(period: str, timestamps: list[dt.datetime]) -> dt.datetime | None:
+    """Resolve a period to a cut-off, counted in *trading sessions* rather than
+    calendar days — "last 3 days" should mean three sessions, not a window that
+    quietly contains a weekend."""
+    sessions = PERIODS.get(period)
+    if not sessions or not timestamps:
+        return None
+    days = sorted({t.date() for t in timestamps})
+    if len(days) <= sessions:
+        return None
+    cutoff = days[-sessions]
+    return next(t for t in timestamps if t.date() == cutoff)
+
+
 def performance_payload(plan_name: str, *, bars: int = 1500,
-                        model_options: bool = False) -> dict[str, Any]:
+                        model_options: bool = False,
+                        period: str = "all",
+                        direction: str = "long") -> dict[str, Any]:
     from ..broker.factory import build_broker
     from ..config import get_settings, load_plans
     from ..engine.history import fetch_candles
@@ -266,8 +317,17 @@ def performance_payload(plan_name: str, *, bars: int = 1500,
         return {"error": "no candles returned"}
 
     result = SvmkrUtHmaOrb(params, plan=plan.name).evaluate(candles)
-    trades = pair_trades(result, square_off=plan.risk.square_off_time,
-                         max_trades_per_day=plan.risk.max_trades_per_day)
+    start = _period_start(period, list(result.timestamps))
+
+    def build(dirn: str) -> list[Trade]:
+        return pair_trades(result, square_off=plan.risk.square_off_time,
+                           max_trades_per_day=plan.risk.max_trades_per_day,
+                           direction=dirn, start=start)
+
+    trades = build(direction)
+    # Always compute all three sides. The question "would trading both
+    # directions help?" is only answerable side by side, and it is cheap.
+    sides = {d: summarise(build(d), key="points") for d in ("long", "short", "both")}
 
     notes: list[str] = []
     modelled = 0
@@ -275,14 +335,19 @@ def performance_payload(plan_name: str, *, bars: int = 1500,
         modelled, notes = model_option_leg(trades, plan, bundle.registry,
                                            bundle.client)
 
-    sessions = len({t.date() for t in result.timestamps})
+    window = [t for t in result.timestamps if start is None or t >= start]
+    sessions = len({t.date() for t in window})
     return {
+        "period": period,
+        "direction": direction,
+        "sides": sides,
+        "periods": list(PERIODS),
         "plan": plan.name,
         "instrument": inst.display_name,
         "timeframe": tf.label,
         "sessions": sessions,
-        "from": result.timestamps[0].isoformat() if result.timestamps else None,
-        "to": result.timestamps[-1].isoformat() if result.timestamps else None,
+        "from": window[0].isoformat() if window else None,
+        "to": window[-1].isoformat() if window else None,
         "square_off": plan.risk.square_off_time.strftime("%H:%M"),
         "max_trades_per_day": plan.risk.max_trades_per_day,
         "points": summarise(trades, key="points"),

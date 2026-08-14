@@ -551,10 +551,12 @@ def create_app(*, allow_control: bool = True):
 
     @app.get("/api/performance/{plan_name}")
     def performance(plan_name: str, bars: int = 1500,
-                    model_options: bool = False) -> dict:
+                    model_options: bool = False, period: str = "all",
+                    direction: str = "long") -> dict:
         from .performance import performance_payload
         return performance_payload(plan_name, bars=bars,
-                                   model_options=model_options)
+                                   model_options=model_options,
+                                   period=period, direction=direction)
 
     @app.post("/api/plan/{plan_name}/enabled")
     def plan_enabled(plan_name: str, payload: dict) -> dict:
