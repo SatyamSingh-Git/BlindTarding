@@ -616,6 +616,8 @@ def signals(
                   f"hma={params.hma_length} orb={params.orb_session} "
                   f"ha={params.use_heikin_ashi}")
 
+    _report_data_quality(candles, tf)
+
     warm = params.min_bars
     if len(candles) <= warm:
         console.print(f"[yellow]only {len(candles)} bars — the first {warm} are warmup, "
@@ -667,6 +669,62 @@ def signals(
     console.print("\n[dim]Compare these timestamps against the Buy/Sell labels on "
                   "your TradingView chart. Any mismatch must be resolved before "
                   "going live.[/dim]")
+
+
+def _report_data_quality(candles, tf: Timeframe) -> None:
+    """Flag gaps and flat bars before the signals are trusted.
+
+    A missing bar is not cosmetic. ATR uses the previous bar's close, so a gap
+    silently widens one bar's true range, which moves the stop, which can move a
+    signal. When comparing against a chart, a divergence caused by missing data
+    looks identical to a divergence caused by a porting bug — so the data is
+    checked first.
+    """
+    if not tf.is_intraday or len(candles) < 2:
+        return
+    import datetime as _dt
+
+    by_day: dict[object, list] = {}
+    for candle in candles:
+        by_day.setdefault(candle.ts.date(), []).append(candle)
+
+    step = _dt.timedelta(minutes=tf.minutes)
+    gaps: dict[str, int] = {}
+    incomplete = 0
+    for day, bars in by_day.items():
+        present = {b.ts.time() for b in bars}
+        cursor = _dt.datetime.combine(day, _dt.time(9, 15))
+        last = max(present)
+        missing = []
+        while cursor.time() <= last:
+            if cursor.time() not in present:
+                missing.append(cursor.time().strftime("%H:%M"))
+            cursor += step
+        if missing:
+            incomplete += 1
+            for slot in missing:
+                gaps[slot] = gaps.get(slot, 0) + 1
+
+    flat = sum(1 for c in candles
+               if c.open == c.high == c.low == c.close)
+
+    if not gaps and not flat:
+        console.print(f"[green]data looks complete[/green] — "
+                      f"{len(by_day)} sessions, no gaps")
+        return
+
+    if gaps:
+        worst = sorted(gaps.items(), key=lambda kv: -kv[1])[:4]
+        detail = ", ".join(f"{slot} ({n}x)" for slot, n in worst)
+        console.print(
+            f"[yellow]data gaps:[/yellow] {incomplete}/{len(by_day)} sessions "
+            f"have missing bars — most often {detail}")
+        console.print("[dim]  ATR uses the previous bar's close, so a gap widens "
+                      "that bar's true range and can move a signal. Expect "
+                      "divergence from the chart around these slots.[/dim]")
+    if flat:
+        console.print(f"[yellow]{flat} flat bars[/yellow] (open=high=low=close) — "
+                      "usually synthetic closing prints, not real trading")
 
 
 def _fmt(value: object) -> str:
