@@ -222,3 +222,37 @@ class TestNullExpirySentinel:
     def test_index_row_has_no_expiry(self, registry):
         assert registry.index("NIFTY").expiry is None
         assert registry.equity("RELIANCE").expiry is None
+
+
+class TestMonthlyVsWeekly:
+    """NSE currency weeklies can expire AFTER the monthly, so "last expiry in
+    the calendar month" silently selects a thinly traded weekly. Monthly
+    contracts name their month; weeklies carry a date."""
+
+    def test_named_month_is_preferred_over_a_later_weekly(self, tmp_path):
+        lines = [HEADER,
+                 row("NSE", "C", "1103", "FUTCUR", "USDINR", "USDINR",
+                     "USDINR26AUGFUT", "1", "2026-08-27", "-0.01", "XX"),
+                 row("NSE", "C", "13873", "FUTCUR", "USDINR", "USDINR",
+                     "USDINR26828FUT", "1", "2026-08-28", "-0.01", "XX")]
+        path = tmp_path / "cur.csv"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        reg = InstrumentRegistry.load(path)
+        chosen = reg.select_expiry("USDINR", InstrumentType.FUTCUR,
+                                   "nearest_monthly", today=dt.date(2026, 8, 14))
+        assert chosen == dt.date(2026, 8, 27)
+        assert reg.future("USDINR", chosen,
+                          instrument_type=InstrumentType.FUTCUR
+                          ).display_name == "USDINR26AUGFUT"
+
+    def test_falls_back_when_no_contract_names_a_month(self, tmp_path):
+        lines = [HEADER,
+                 row("NSE", "C", "1", "FUTCUR", "X", "X", "X26814FUT", "1",
+                     "2026-08-14", "-0.01", "XX"),
+                 row("NSE", "C", "2", "FUTCUR", "X", "X", "X26828FUT", "1",
+                     "2026-08-28", "-0.01", "XX")]
+        path = tmp_path / "cur.csv"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        reg = InstrumentRegistry.load(path)
+        assert reg.select_expiry("X", InstrumentType.FUTCUR, "nearest_monthly",
+                                 today=dt.date(2026, 8, 1)) == dt.date(2026, 8, 28)

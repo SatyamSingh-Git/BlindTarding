@@ -288,11 +288,31 @@ class InstrumentRegistry:
         if rule in ("next", "next_weekly"):
             return avail[1] if len(avail) > 1 else avail[0]
         if rule in ("nearest_monthly", "monthly", "next_monthly"):
-            monthly = _monthly_expiries(avail)
+            monthly = self._monthly_for(underlying, instrument_type, avail)
             if not monthly:
                 return avail[-1]
             return monthly[1] if rule == "next_monthly" and len(monthly) > 1 else monthly[0]
         raise InstrumentError(f"unknown expiry rule {rule!r}")
+
+    def _monthly_for(self, underlying: str, instrument_type: InstrumentType,
+                     available: Sequence[dt.date]) -> list[dt.date]:
+        """Monthly expiries, preferring contracts whose name states a month."""
+        und = underlying.upper()
+        named: list[dt.date] = []
+        if instrument_type in FUTURE_TYPES:
+            futures = self._futures.get((und, instrument_type), {})
+            named = sorted(e for e in available
+                           if e in futures and _looks_monthly(futures[e].display_name))
+        else:
+            chain = self._chains.get((und, instrument_type), {})
+            for expiry in available:
+                for by_strike in chain.get(expiry, {}).values():
+                    inst = next(iter(by_strike.values()), None)
+                    if inst is not None and _looks_monthly(inst.display_name):
+                        named.append(expiry)
+                    break
+            named = sorted(set(named))
+        return named or _monthly_expiries(available)
 
     # --- options --------------------------------------------------------
     def strikes(
@@ -376,8 +396,24 @@ class InstrumentRegistry:
         return inst
 
 
+_MONTH_TOKENS = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                 "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
+
+
+def _looks_monthly(display_name: str) -> bool:
+    """Monthly contracts name their month; weeklies carry a date instead.
+
+    `USDINR26AUGFUT` is the monthly, `USDINR26814FUT` and `USDINR26828FUT` are
+    weeklies. Distinguishing them matters because a weekly can expire *after*
+    the monthly — NSE currency weeklies run past the monthly expiry — so
+    "the last expiry in the month" silently picks a thinly traded weekly.
+    """
+    name = (display_name or "").upper()
+    return any(token in name for token in _MONTH_TOKENS)
+
+
 def _monthly_expiries(expiries: Sequence[dt.date]) -> list[dt.date]:
-    """The last expiry in each calendar month — the monthly contract."""
+    """Fallback: the last expiry in each calendar month."""
     last: dict[tuple[int, int], dt.date] = {}
     for e in expiries:
         key = (e.year, e.month)
