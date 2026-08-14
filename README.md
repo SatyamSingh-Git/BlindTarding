@@ -3,9 +3,11 @@
 Automated execution of the `SVMKR_UT_HMA_ORB` TradingView indicator on
 [Dhan](https://dhan.co), across index options, futures and cash equity.
 
-**Status: Phases 0–2 complete.** Data layer and indicator port both work. No
-orders are placed yet, and nothing trades until the port clears the validation
-gate in [PLAN.md](PLAN.md#6-the-validation-gate--most-important-section).
+**Status: Phases 0–4 complete.** Data layer, indicator port, execution layer and
+ops are all built and tested. Paper mode runs end to end. Nothing trades with
+real money until the port clears the validation gate in
+[PLAN.md](PLAN.md#6-the-validation-gate--most-important-section), and every plan
+ships `enabled: false`.
 
 ---
 
@@ -68,7 +70,7 @@ futures and equities from config alone.
 ```bash
 pip install -e ".[dev]"
 cp .env.example .env          # fill in Dhan credentials
-pytest -q                     # 244 tests, no credentials needed
+pytest -q                     # 418 tests, no credentials needed
 
 orbot doctor                  # config, credentials, connectivity
 orbot instruments             # download today's scrip master
@@ -78,8 +80,61 @@ orbot chain NIFTY --spot 24300      # verify strike + expiry selection
 orbot warmup  nifty-atm-ce -t 15m   # historical bars — compare against the chart
 orbot signals nifty-atm-ce -t 5m    # replay history, list every signal
 orbot feed    nifty-atm-ce          # live ticks, bars printed as they close
+
+orbot validate                # static checks on every enabled plan, no network
+orbot run --mode paper        # run the engine with simulated fills
+orbot status                  # positions, P&L, halt state
+orbot flatten                 # close every open position
 orbot halt                    # arm the kill switch
 ```
+
+## Risk guards
+
+Fourteen checks stand between a signal and an order. Three rules govern them:
+
+**Fail closed.** Any guard that cannot evaluate — a funds call that errored, a
+reconciliation that could not reach the broker, a feed that has never
+delivered — blocks. An unknown state is not a safe state.
+
+**Halts are sticky.** A tripped daily-loss limit persists to disk and survives a
+restart. A limit that resets itself on restart turns a crash-loop into an
+unlimited-loss loop.
+
+**Blocking is cheap.** A missed trade costs one signal. A duplicate order, a
+trade on a frozen feed, or a position the bot has lost track of can cost far
+more, and none of them announce themselves.
+
+| # | Guard | On trip |
+|---|---|---|
+| 1 | Kill switch (file or in-process) | block all |
+| 2 | Daily loss cap (realised + unrealised) | halt + flatten |
+| 3 | Max trades/day per plan | block plan |
+| 4 | Max open positions, account-wide | block new |
+| 5 | Duplicate signal (SQLite UNIQUE, survives restart) | drop |
+| 6 | Feed staleness | block |
+| 7 | Market hours + holidays | block |
+| 8 | Available funds (exits exempt) | block |
+| 9 | Order rate limit | refuse |
+| 10 | Fat-finger qty and notional | block |
+| 11 | Position reconciliation vs broker | halt |
+| 12 | Square-off window | block new entries |
+| 13 | Slippage on limit orders | block |
+| 14 | Signal staleness (incl. future-dated bars) | drop |
+
+Deduplication lives in SQLite rather than memory on purpose: an in-memory set
+forgets on restart, so a bot that crashes mid-session would happily re-fire a
+signal it had already acted on.
+
+## Paper mode
+
+`orbot run --mode paper` exercises the **same** strategy, guards, resolver,
+position book and journal as live — only the OMS differs. If paper took a
+different path, a clean fortnight of paper trading would prove nothing about the
+live path.
+
+Paper fills are deliberately optimistic: immediate, in full, at the reference
+price plus a fixed slippage. Real fills on an illiquid strike will be worse. It
+exists to prove the pipeline works, not to predict P&L.
 
 ## Timeframes
 
@@ -104,9 +159,9 @@ src/orbot/
   broker/     Dhan REST, live feed + binary parser, instrument registry
   engine/     timeframes, candle aggregation, indicators, strategy
     indicators/pine.py    Pine v4 primitives — where fidelity lives
-  execution/  resolver, risk guards, OMS       (Phase 3)
+  execution/  resolver, 14 risk guards, position book, paper + live OMS
   ingest/     TradingView webhook, replay      (Phase 6)
-  ops/        Telegram, kill switch, health    (Phase 4)
+  ops/        journal (SQLite), Telegram, kill switch, market calendar
 config/
   instruments.yaml   trade plans — what to trade
   risk.yaml          account-wide limits
@@ -128,16 +183,18 @@ available and will produce entries that vanish before the candle closes.
 
 ## Testing
 
-244 tests. Roughly half are adversarial — the threat model is not an attacker,
+418 tests. Roughly a third are adversarial — the threat model is not an attacker,
 it's a bad afternoon: a truncated frame during a reconnect, a NaN from a stale
 contract, a volume counter reset at midnight, a CSV that changed shape
 overnight. Each of those can produce a *plausible* wrong number that gets
 traded on.
 
-The adversarial suite has caught four real bugs so far: a malformed FULL packet
-layout, non-finite prices reaching the candle engine, a NaN spot silently
-selecting a real-but-wrong strike, and Dhan's `0001-01-01` null-expiry sentinel
-sorting ahead of every genuine expiry.
+The suite has caught six real bugs so far: a malformed FULL packet layout,
+non-finite prices reaching the candle engine, a NaN spot silently selecting a
+real-but-wrong strike, Dhan's `0001-01-01` null-expiry sentinel sorting ahead of
+every genuine expiry, a resampler that emitted bars spanning overnight gaps, and
+a fill ledger keyed on the order rather than the intent — which double-counted
+when two order attempts collided on a blank id.
 
 ```bash
 pytest tests/test_adversarial.py -q

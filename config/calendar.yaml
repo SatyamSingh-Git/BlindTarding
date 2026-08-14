@@ -1,0 +1,29 @@
+# NSE trading calendar.
+#
+# IMPORTANT: this list is advisory, not a safety mechanism. The real protection
+# against trading when the market is shut is the feed-staleness guard — no ticks
+# means no trading, whatever this file claims.
+#
+# It defaults to empty on purpose. An empty list makes the system rely on the
+# feed, which is the safe failure mode. A stale list that says "open" on a
+# closed day is not.
+#
+# Fill in from the official NSE holiday circular:
+#   https://www.nseindia.com/resources/exchange-communication-holidays
+# Verify it yourself — do not trust a copied list.
+
+open: "09:15"
+close: "15:30"
+
+# Full-day closures. Format: YYYY-MM-DD
+holidays: []
+  # - 2026-01-26   # Republic Day
+  # - 2026-03-06   # Holi
+  # ...
+
+# Sessions with non-standard hours (muhurat trading, special live sessions).
+# These override weekends and holidays.
+special_sessions: []
+  # - date: 2026-11-08
+  #   open: "18:15"
+  #   close: "19:15"

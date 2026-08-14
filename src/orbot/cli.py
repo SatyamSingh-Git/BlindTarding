@@ -11,6 +11,14 @@ Phase 0/1 commands — everything here works before a single order is ever place
     orbot plans             list configured trade plans
     orbot timeframes        list every timeframe the engine can serve
     orbot signals nifty-atm-ce -t 15m   replay history, list every signal
+
+Execution:
+
+    orbot validate          static checks on every enabled plan
+    orbot run --mode paper  run the engine with simulated fills
+    orbot status            positions, P&L, halt state
+    orbot flatten           close every open position
+    orbot halt              arm the kill switch
 """
 
 from __future__ import annotations
@@ -33,7 +41,21 @@ from .broker.instruments import (
     download_scrip_master,
     is_fresh,
 )
-from .config import DATA_DIR, HALT_FILE, TradePlan, get_settings, load_plans, load_risk
+from .config import (
+    CONFIG_DIR,
+    DATA_DIR,
+    HALT_FILE,
+    TradePlan,
+    get_settings,
+    load_plans,
+    load_risk,
+)
+from .engine.runner import TradingEngine
+from .execution.oms import build_oms
+from .ops.journal import Journal
+from .ops.killswitch import KillSwitch
+from .ops.market_calendar import MarketCalendar
+from .ops.notifier import build_notifier
 from .constants import ExchangeSegment, InstrumentType, OptionType
 from .engine.candles import CandleSeries
 from .engine.history import fetch_candles
@@ -545,13 +567,204 @@ def _fmt(value: object) -> str:
 
 @app.command()
 def halt(clear: bool = typer.Option(False, "--clear", help="Disarm the kill switch")) -> None:
-    """Arm or clear the kill switch."""
+    """Arm or clear the kill switch.
+
+    The file-based switch works even when the process is wedged, and survives a
+    restart — a crash-loop cannot clear it.
+    """
+    switch = KillSwitch(HALT_FILE)
     if clear:
-        HALT_FILE.unlink(missing_ok=True)
+        switch.clear()
         console.print("[green]kill switch cleared[/green] — trading permitted")
     else:
-        HALT_FILE.write_text(f"halted at {dt.datetime.now().isoformat()}\n", encoding="utf-8")
+        state = switch.trip("armed manually via CLI")
         console.print(f"[red]KILL SWITCH ARMED[/red] — {HALT_FILE}")
+        console.print(f"reason: {state.reason}")
+
+
+# --- execution ----------------------------------------------------------
+def _build_context(mode: str | None = None):
+    """Assemble everything the engine needs. Shared by run/validate/status."""
+    settings = get_settings()
+    if mode:
+        settings.trade_mode = mode  # type: ignore[assignment]
+    plans_cfg = load_plans()
+    risk = load_risk()
+    calendar = MarketCalendar.load(CONFIG_DIR / "calendar.yaml")
+    killswitch = KillSwitch(HALT_FILE)
+    journal = Journal(settings.journal_path)
+    notifier = build_notifier(settings.telegram_bot_token, settings.telegram_chat_id)
+
+    underlyings = [p.execution.underlying for p in plans_cfg
+                   if p.enabled and p.execution.underlying]
+    registry = _registry(underlyings=underlyings or None)
+
+    client = None
+    if not settings.missing_credentials():
+        client = DhanClient(
+            settings.dhan_client_id, settings.dhan_access_token,
+            order_proxy=settings.dhan_order_proxy or None,
+            proxy_data_calls=settings.proxy_data_calls,
+            max_orders_per_second=settings.max_orders_per_second,
+            max_orders_per_day=settings.max_orders_per_day,
+        )
+    oms = build_oms(settings.trade_mode, client)
+    engine = TradingEngine(
+        settings=settings, plans=plans_cfg, risk=risk, registry=registry,
+        client=client, oms=oms, journal=journal, notifier=notifier,
+        killswitch=killswitch, calendar=calendar,
+    )
+    return settings, engine, journal
+
+
+@app.command()
+def validate() -> None:
+    """Static checks on every enabled plan. No network, no orders.
+
+    Run this before the market opens. A bad plan caught here fails at 08:00
+    rather than at 09:20 with a live signal in hand.
+    """
+    _settings, engine, journal = _build_context()
+    try:
+        problems = engine.validate()
+    finally:
+        journal.close()
+
+    if not problems:
+        console.print(f"[green]OK[/green] — {len(engine.states)} enabled plan(s) valid")
+        for name, state in engine.states.items():
+            console.print(f"  {name}: signal {state.instrument.display_name} "
+                          f"@ {state.timeframe.label}, mode "
+                          f"{state.plan.execution.mode}, needs "
+                          f"{state.strategy.params.min_bars} warmup bars")
+        return
+    console.print(f"[red]{len(problems)} problem(s)[/red]")
+    for problem in problems:
+        console.print(f"  - {problem}")
+    raise typer.Exit(1)
+
+
+@app.command()
+def run(
+    mode: str = typer.Option(None, "--mode", "-m", help="paper | live (default: .env)"),
+    yes: bool = typer.Option(False, "--yes", help="Skip the live-trading confirmation"),
+) -> None:
+    """Run the trading engine.
+
+    Paper mode simulates fills and sends nothing to the broker. Every other part
+    of the pipeline — strategy, guards, resolver, position book, journal — is
+    identical in both modes, so a clean paper run actually exercises the live
+    path.
+    """
+    settings, engine, journal = _build_context(mode)
+
+    if settings.is_live and not yes:
+        console.print("[red bold]LIVE MODE — this will place real orders with "
+                      "real money.[/red bold]")
+        console.print(f"plans: {', '.join(engine.states) or '(none enabled)'}")
+        console.print(f"daily loss cap: Rs.{engine.risk.max_daily_loss:,.0f}")
+        if not typer.confirm("Proceed?", default=False):
+            console.print("aborted")
+            journal.close()
+            raise typer.Exit(0)
+
+    console.print(f"[bold]{settings.trade_mode.upper()}[/bold] mode — "
+                  f"{engine.calendar.describe()}")
+    console.print("Ctrl-C to stop. Arm the kill switch any time with "
+                  "[bold]orbot halt[/bold].")
+    try:
+        asyncio.run(engine.run())
+    except KeyboardInterrupt:
+        console.print("\nstopping...")
+        asyncio.run(engine.stop())
+    finally:
+        journal.close()
+
+
+@app.command()
+def status() -> None:
+    """Positions, P&L and halt state."""
+    settings = get_settings()
+    switch = KillSwitch(HALT_FILE)
+    journal = Journal(settings.journal_path)
+    calendar = MarketCalendar.load(CONFIG_DIR / "calendar.yaml")
+    try:
+        realised, unrealised = journal.daily_pnl()
+        state = switch.state()
+        console.print(f"market:  {calendar.describe()}")
+        console.print(f"mode:    {settings.trade_mode}")
+        console.print("halted:  " + (f"[red]YES[/red] ({state.source}: {state.reason})"
+                                     if state.halted else "[green]no[/green]"))
+        console.print(f"P&L:     realised Rs.{realised:,.2f}, "
+                      f"unrealised Rs.{unrealised:,.2f}")
+        console.print(f"trades:  {journal.trades_today()} today")
+
+        open_orders = journal.open_orders()
+        if open_orders:
+            table = Table(title="open orders")
+            for col in ("order id", "plan", "instrument", "side", "qty", "status"):
+                table.add_column(col)
+            for row in open_orders:
+                table.add_row(row["order_id"] or "-", row["plan"],
+                              row["display_name"] or row["security_id"],
+                              row["transaction_type"], str(row["quantity"]),
+                              row["status"] or "-")
+            console.print(table)
+    finally:
+        journal.close()
+
+    if settings.missing_credentials():
+        return
+    try:
+        with _client() as client:
+            positions = [p for p in client.positions() if p.net_qty != 0]
+    except DhanAPIError as exc:
+        console.print(f"[yellow]could not read broker positions: {exc}[/yellow]")
+        return
+    if not positions:
+        console.print("[green]broker reports no open positions[/green]")
+        return
+    table = Table(title="broker positions")
+    for col in ("security id", "segment", "net qty", "avg price", "unrealised"):
+        table.add_column(col)
+    for p in positions:
+        table.add_row(p.security_id, p.segment.value, f"{p.net_qty:+d}",
+                      f"{p.avg_price:,.2f}", f"{p.unrealised:,.2f}")
+    console.print(table)
+
+
+@app.command()
+def flatten(
+    yes: bool = typer.Option(False, "--yes", help="Skip confirmation"),
+) -> None:
+    """Close every open position immediately.
+
+    The manual escape hatch. Places real exit orders in live mode.
+    """
+    settings, engine, journal = _build_context()
+    try:
+        positions = engine.oms.positions()
+        if not positions:
+            console.print("[green]nothing to close[/green]")
+            return
+        table = Table(title="positions to close")
+        for col in ("security id", "segment", "net qty", "avg price"):
+            table.add_column(col)
+        for p in positions:
+            table.add_row(p.security_id, p.segment.value, f"{p.net_qty:+d}",
+                          f"{p.avg_price:,.2f}")
+        console.print(table)
+        if settings.is_live and not yes:
+            if not typer.confirm(f"Close {len(positions)} position(s) with real "
+                                 "orders?", default=False):
+                console.print("aborted")
+                raise typer.Exit(0)
+        engine.book.adopt(positions)
+        asyncio.run(engine.flatten("manual flatten via CLI"))
+        console.print("[green]flatten complete[/green] — verify with "
+                      "[bold]orbot status[/bold]")
+    finally:
+        journal.close()
 
 
 if __name__ == "__main__":
