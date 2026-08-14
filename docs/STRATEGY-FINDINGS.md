@@ -118,3 +118,50 @@ a clock time fixes it everywhere.
 
 It was caught because the chart looked more profitable than the numbers, and
 the discrepancy turned out to be real rather than the usual visual bias.
+
+
+## Position sizing on Rs 2,00,000 — the part that decides everything
+
+Every P&L above was quoted per lot without stating the capital a lot requires.
+That makes the numbers useless and, worse, flattering. Corrected:
+
+| contract | size | notional | margin | affordable on Rs 2 lakh |
+|---|---|---|---|---|
+| GOLD | 1 kg | Rs 1.54 cr | Rs 9,24,000 | **no** |
+| GOLDM | 100 g | Rs 15.3 lakh | Rs 92,400 | 1 lot safely, 2 not |
+| GOLDGUINEA | 8 g | Rs 1.23 lakh | Rs 7,392 | 27 lots |
+
+Running the equity curve against a live margin requirement, GOLDM 2h long only,
+13 months:
+
+| | final equity | worst drawdown | outcome |
+|---|---|---|---|
+| **1 lot** | Rs 3,99,430 (**+100%**) | Rs 33,259 | survives |
+| 2 lots | Rs 6,01,927 (+201%) | Rs 65,998 | **margin call, 29 Oct 2025** |
+
+The two-lot version reaches +201% on paper and never gets there in practice: it
+falls below the margin requirement in October 2025 and is liquidated. Backtests
+that ignore margin routinely report returns their own drawdowns would have
+prevented.
+
+### Where the return actually comes from
+
+Leverage is **16.5 : 1**. A 6.0% adverse move wipes one lot's margin. Gold rose
+58% across the window, so a long-only strategy participating even partially,
+levered 16x, produces a large number. That is leverage on a bull market, not
+alpha, and the same leverage runs in reverse.
+
+The strategy's real contribution is survivability, and it is substantial: buying
+and holding one GOLDM lot would have returned more in absolute terms but carried
+a Rs 4,70,370 drawdown, which liquidates a Rs 2 lakh account several times over.
+The strategy's worst drawdown was Rs 33,259 — 17% of capital.
+
+### The risk that is not in any of these numbers
+
+The largest overnight gap in the window was 4,283 points, **Rs 42,830 per lot —
+46% of one lot's margin**. Daily square-off avoids gaps only while the bot is
+actually running. A crash, a dropped network, an expired token or a power cut
+during the 09:00-23:30 session leaves a levered position open into that gap.
+
+That is the single strongest argument for the guard layer, the kill switch and
+the two-week paper run — not for the strategy.
