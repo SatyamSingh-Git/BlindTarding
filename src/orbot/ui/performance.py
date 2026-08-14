@@ -208,6 +208,14 @@ def model_option_leg(trades: list[Trade], plan, registry, client, *,
     from ..execution.resolver import ExecutionResolver
     from ..models import Signal
 
+    import time as _time
+
+    # Angel caps historical requests at roughly 3/second and answers 403 when
+    # exceeded. Without a throttle the first attempt modelled 2 of 49 trades and
+    # produced a number that looked like an answer but was noise.
+    THROTTLE = 0.4
+    RETRIES = 2
+
     notes: list[str] = []
     cfg = plan.execution
     if cfg.mode != "option" or not cfg.on_buy or not cfg.on_buy.option_type:
@@ -235,14 +243,22 @@ def model_option_leg(trades: list[Trade], plan, registry, client, *,
         key = (contract.security_id, trade.entry_ts.date())
         bars = cache.get(key)
         if bars is None:
-            try:
-                day = trade.entry_ts.date()
-                fetched = client.intraday(
-                    contract, plan.signal.tf.minutes if plan.signal.tf.is_intraday else 5,
-                    dt.datetime.combine(day, dt.time(9, 0)),
-                    dt.datetime.combine(day, dt.time(15, 40)))
-            except Exception as exc:
-                notes.append(f"{contract.display_name}: no history ({exc})")
+            day = trade.entry_ts.date()
+            interval = (plan.signal.tf.minutes
+                        if plan.signal.tf.is_intraday else 5)
+            fetched, last_error = None, ""
+            for attempt in range(RETRIES + 1):
+                _time.sleep(THROTTLE * (attempt + 1))
+                try:
+                    fetched = client.intraday(
+                        contract, interval,
+                        dt.datetime.combine(day, dt.time(9, 0)),
+                        dt.datetime.combine(day, dt.time(15, 40)))
+                    break
+                except Exception as exc:
+                    last_error = str(exc)[:90]
+            if fetched is None:
+                notes.append(f"{contract.display_name}: no history ({last_error})")
                 cache[key] = {}
                 continue
             bars = {c.ts.replace(tzinfo=IST_TZ) if c.ts.tzinfo is None else c.ts: c.close
