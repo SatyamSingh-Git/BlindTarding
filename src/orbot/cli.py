@@ -34,6 +34,7 @@ from rich.table import Table
 
 from . import logging_setup
 from .broker.auth import AuthError, TokenManager
+from .broker.factory import build_broker, check_plan_ids
 from .broker.dhan_client import DhanAPIError, DhanClient
 from .broker.dhan_feed import DhanFeed, FeedInstrument
 from .broker.instruments import (
@@ -71,17 +72,26 @@ from .engine.timeframe import (
 )
 from .models import Action, Candle, Instrument
 
-app = typer.Typer(add_completion=False, help="Automated SVMKR_UT_HMA_ORB execution on Dhan.")
+app = typer.Typer(add_completion=False,
+                  help="Automated SVMKR_UT_HMA_ORB execution on Dhan or Angel One.")
 console = Console()
 
 
+def _broker(*, underlyings: list[str] | None = None, settings=None,
+            refresh_instruments: bool = True):
+    """Assemble the configured broker. This is the only place a broker is named."""
+    settings = settings or get_settings()
+    return build_broker(settings, underlyings=underlyings,
+                        refresh_instruments=refresh_instruments)
+
+
+def _scrip_master_path(settings):
+    return (settings.angel_scrip_master_path if settings.broker == "angel"
+            else settings.scrip_master_path)
+
+
 def _registry(*, underlyings: list[str] | None = None) -> InstrumentRegistry:
-    settings = get_settings()
-    path = settings.scrip_master_path
-    if not is_fresh(path):
-        console.print("[yellow]scrip master missing or stale — downloading[/yellow]")
-        download_scrip_master(path)
-    return InstrumentRegistry.load(path, underlyings=underlyings)
+    return _broker(underlyings=underlyings).registry
 
 
 def _token_manager(settings=None) -> TokenManager:
@@ -100,21 +110,15 @@ def _token_manager(settings=None) -> TokenManager:
     )
 
 
-def _client() -> DhanClient:
+def _client():
     settings = get_settings()
     missing = settings.missing_credentials()
     if missing:
-        console.print(f"[red]missing credentials: {', '.join(missing)}[/red]")
+        console.print(f"[red]missing credentials for broker "
+                      f"{settings.broker!r}: {', '.join(missing)}[/red]")
         console.print("Copy .env.example to .env and fill it in.")
         raise typer.Exit(1)
-    return DhanClient(
-        settings.dhan_client_id,
-        _token_manager(settings),
-        order_proxy=settings.dhan_order_proxy or None,
-        proxy_data_calls=settings.proxy_data_calls,
-        max_orders_per_second=settings.max_orders_per_second,
-        max_orders_per_day=settings.max_orders_per_day,
-    )
+    return _broker(settings=settings).client
 
 
 def _find_plan(name: str) -> TradePlan:
@@ -182,20 +186,41 @@ def doctor() -> None:
     mode_warn = "[red]LIVE — real money[/red]" if settings.is_live else "paper (simulated)"
     row("trade mode", True, mode_warn)
 
-    tokens = _token_manager(settings)
-    if tokens.can_self_renew:
-        row("access token", True,
-            f"self-renewing via TOTP — {tokens.describe()}")
-    elif settings.dhan_access_token:
-        row("access token", False,
-            "STATIC — Dhan tokens expire in 24h, so unattended running will "
-            "break every morning. Set DHAN_PIN + DHAN_TOTP_SECRET.")
-    else:
-        row("access token", False, "none configured")
+    row("broker", True, settings.broker)
 
-    row("static IP proxy", bool(settings.dhan_order_proxy),
-        "configured" if settings.dhan_order_proxy
-        else "NOT SET — Dhan requires a whitelisted static IP for order placement")
+    if settings.broker == "angel":
+        if settings.can_self_renew_angel:
+            row("access token", True, "self-renewing via TOTP (Angel)")
+        else:
+            row("access token", False,
+                "Angel needs ANGEL_MPIN + ANGEL_TOTP_SECRET to log itself in")
+    else:
+        tokens = _token_manager(settings)
+        if tokens.can_self_renew:
+            row("access token", True, f"self-renewing via TOTP — {tokens.describe()}")
+        elif settings.dhan_access_token:
+            row("access token", False,
+                "STATIC — Dhan tokens expire in 24h, so unattended running will "
+                "break every morning. Set DHAN_PIN + DHAN_TOTP_SECRET.")
+        else:
+            row("access token", False, "none configured")
+
+    stale_ids = check_plan_ids(settings.broker,
+                               [p.signal.security_id for p in plans])
+    row("instrument ids", not stale_ids,
+        stale_ids[0][:150] if stale_ids else
+        f"consistent with broker {settings.broker!r}")
+
+    # Both brokers require a whitelisted static IP for order placement. A proxy
+    # is one way to get one; running from an already-whitelisted machine is
+    # another, so an unset proxy is a warning rather than a failure.
+    if settings.dhan_order_proxy:
+        row("static IP", True, "routing order calls through the configured proxy")
+    else:
+        table.add_row("static IP",
+                      "[yellow]NOTE[/yellow]  no proxy set — order placement will "
+                      "use this machine's own IP, which must be the one "
+                      f"whitelisted with {settings.broker}")
 
     row("kill switch", not HALT_FILE.exists(),
         "armed (HALT file present — trading blocked)" if HALT_FILE.exists() else "clear")
@@ -210,19 +235,25 @@ def doctor() -> None:
         f"max {risk.max_open_positions} positions, "
         f"feed staleness {risk.feed_staleness_seconds}s")
 
-    sm = settings.scrip_master_path
+    sm = _scrip_master_path(settings)
     row("scrip master", sm.exists(),
         f"{sm.name} ({sm.stat().st_size // (1 << 20)} MB, "
         f"{'fresh' if is_fresh(sm) else 'STALE — run: orbot instruments'})"
         if sm.exists() else "not downloaded — run: orbot instruments")
 
     if not missing:
+        label = f"{settings.broker} api"
         try:
-            with _client() as client:
-                balance = client.available_balance()
-            row("dhan api", True, f"reachable, available balance Rs.{balance:,.2f}")
-        except DhanAPIError as exc:
-            row("dhan api", False, str(exc)[:160])
+            # No instrument refresh: doctor reports state, it does not change it.
+            client = _broker(settings=settings, refresh_instruments=False).client
+            balance = client.available_balance()
+            row(label, True, f"reachable, available balance Rs.{balance:,.2f}")
+            if balance <= 0:
+                table.add_row("funds", "[yellow]NOTE[/yellow]  zero balance — "
+                              "fine for paper trading and the validation gate, "
+                              "but live orders will be rejected")
+        except Exception as exc:
+            row(label, False, str(exc)[:160])
 
     console.print(table)
     if not ok:
@@ -708,9 +739,16 @@ def validate() -> None:
     Run this before the market opens. A bad plan caught here fails at 08:00
     rather than at 09:20 with a live signal in hand.
     """
-    _settings, engine, journal = _build_context()
+    settings, engine, journal = _build_context()
     try:
         problems = engine.validate()
+        problems.extend(check_plan_ids(
+            settings.broker, [p.signal.security_id for p in load_plans()]))
+        if not engine.supports_correlation_id:
+            console.print(
+                "[yellow]note:[/yellow] this broker has no correlation id, so an "
+                "order that times out cannot be resolved by lookup. The bot halts "
+                "instead of guessing — resolve it in the broker's order book.")
     finally:
         journal.close()
 

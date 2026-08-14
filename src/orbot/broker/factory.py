@@ -45,6 +45,7 @@ class BrokerBundle:
     client: object                      # REST: data + orders
     registry: InstrumentRegistry
     make_feed: Callable[[Callable[[Tick], None]], object]
+    feed_instrument: type          # how this broker names a subscription
     token_status: Callable[[], str]
     native_intervals: tuple[int, ...]
     supports_correlation_id: bool
@@ -54,7 +55,8 @@ class BrokerBundle:
         return bool(getattr(self.client, "has_static_ip_proxy", False))
 
 
-def _dhan_bundle(settings: Settings, underlyings: list[str] | None) -> BrokerBundle:
+def _dhan_bundle(settings: Settings, underlyings: list[str] | None,
+                 refresh_instruments: bool = True) -> BrokerBundle:
     from ..constants import INTRADAY_INTERVALS
     from .auth import TokenManager
     from .dhan_client import DhanClient
@@ -67,10 +69,11 @@ def _dhan_bundle(settings: Settings, underlyings: list[str] | None) -> BrokerBun
         cache_path=settings.token_cache_path,
     )
     path = settings.scrip_master_path
-    if not is_fresh(path):
+    if refresh_instruments and not is_fresh(path):
         log.info("broker.refreshing_scrip_master", broker="dhan")
         download_scrip_master(path)
-    registry = InstrumentRegistry.load(path, underlyings=underlyings)
+    registry = (InstrumentRegistry.load(path, underlyings=underlyings)
+                if path.exists() else InstrumentRegistry([]))
 
     client = DhanClient(
         settings.dhan_client_id, tokens,
@@ -81,18 +84,18 @@ def _dhan_bundle(settings: Settings, underlyings: list[str] | None) -> BrokerBun
     )
 
     def make_feed(on_tick):
-        feed = DhanFeed(settings.dhan_client_id, tokens.token, on_tick=on_tick)
-        feed._orbot_instrument = FeedInstrument      # used by the engine to subscribe
-        return feed
+        return DhanFeed(settings.dhan_client_id, tokens.token, on_tick=on_tick)
 
     return BrokerBundle(
         name="dhan", client=client, registry=registry, make_feed=make_feed,
+        feed_instrument=FeedInstrument,
         token_status=tokens.describe, native_intervals=INTRADAY_INTERVALS,
         supports_correlation_id=True,
     )
 
 
-def _angel_bundle(settings: Settings, underlyings: list[str] | None) -> BrokerBundle:
+def _angel_bundle(settings: Settings, underlyings: list[str] | None,
+                  refresh_instruments: bool = True) -> BrokerBundle:
     from .angel.auth import AngelAuth
     from .angel.client import NATIVE_INTERVALS, AngelClient
     from .angel.feed import AngelFeed, AngelFeedInstrument
@@ -104,10 +107,11 @@ def _angel_bundle(settings: Settings, underlyings: list[str] | None) -> BrokerBu
         cache_path=settings.angel_session_path,
     )
     path = settings.angel_scrip_master_path
-    if not _is_fresh(path):
+    if refresh_instruments and not _is_fresh(path):
         log.info("broker.refreshing_scrip_master", broker="angel")
         download_scrip_master(path)
-    registry = load_registry(path, underlyings=underlyings)
+    registry = (load_registry(path, underlyings=underlyings)
+                if path.exists() else InstrumentRegistry([]))
 
     client = AngelClient(
         auth, order_proxy=settings.dhan_order_proxy or None,
@@ -117,12 +121,11 @@ def _angel_bundle(settings: Settings, underlyings: list[str] | None) -> BrokerBu
     )
 
     def make_feed(on_tick):
-        feed = AngelFeed(auth, on_tick=on_tick)
-        feed._orbot_instrument = AngelFeedInstrument
-        return feed
+        return AngelFeed(auth, on_tick=on_tick)
 
     return BrokerBundle(
         name="angel", client=client, registry=registry, make_feed=make_feed,
+        feed_instrument=AngelFeedInstrument,
         token_status=auth.describe, native_intervals=NATIVE_INTERVALS,
         # Angel has no correlation id, so an ambiguous placement cannot be
         # resolved by lookup — the OMS escalates instead of guessing.
@@ -138,10 +141,17 @@ def _is_fresh(path: Path) -> bool:
 
 
 def build_broker(settings: Settings, *,
-                 underlyings: list[str] | None = None) -> BrokerBundle:
+                 underlyings: list[str] | None = None,
+                 refresh_instruments: bool = True) -> BrokerBundle:
+    """Assemble the configured broker.
+
+    `refresh_instruments=False` for read-only inspection: a diagnostic command
+    should report the world as it is, not download 34 MB and then report the
+    state from before it did.
+    """
     if settings.broker == "angel":
-        return _angel_bundle(settings, underlyings)
-    return _dhan_bundle(settings, underlyings)
+        return _angel_bundle(settings, underlyings, refresh_instruments)
+    return _dhan_bundle(settings, underlyings, refresh_instruments)
 
 
 def check_plan_ids(broker: str, security_ids: list[str]) -> list[str]:

@@ -30,8 +30,7 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from ..broker.dhan_client import DhanClient, OrderStateUnknown
-from ..broker.dhan_feed import DhanFeed, FeedInstrument
+from ..broker.dhan_client import OrderStateUnknown
 from ..broker.instruments import InstrumentRegistry
 from ..config import GlobalRisk, Settings, TradePlan
 from ..constants import IST
@@ -86,16 +85,19 @@ class TradingEngine:
         plans: list[TradePlan],
         risk: GlobalRisk,
         registry: InstrumentRegistry,
-        client: DhanClient | None,
+        client: object | None,
         oms: OMS,
         journal: Journal,
         notifier: Notifier,
         killswitch: KillSwitch,
         calendar: MarketCalendar,
-        token_provider: Callable[[], str] | None = None,
+        make_feed: Callable[[Callable[[Tick], None]], object] | None = None,
+        feed_instrument: type | None = None,
     ) -> None:
         self.settings = settings
-        self.token_provider = token_provider
+        # Supplied by the broker bundle. The engine never names a broker.
+        self.make_feed = make_feed
+        self.feed_instrument = feed_instrument
         self.risk = risk
         self.registry = registry
         self.client = client
@@ -108,7 +110,9 @@ class TradingEngine:
         self.guards = GuardChain(risk, killswitch, calendar, journal)
         self.book = PositionBook()
         self.states: dict[str, PlanState] = {}
-        self.feed: DhanFeed | None = None
+        self.feed = None
+        self.broker_name = ""
+        self.supports_correlation_id = True
         self.last_prices: dict[tuple[str, str], float] = {}
         self._running = False
         self._tasks: list[asyncio.Task] = []
@@ -200,15 +204,18 @@ class TradingEngine:
                         state.position_key = position.key
 
     # --- feed ------------------------------------------------------------
-    def _subscriptions(self) -> list[FeedInstrument]:
-        wanted: dict[tuple[str, str], FeedInstrument] = {}
+    def _subscriptions(self) -> list[object]:
+        make = self.feed_instrument
+        if make is None:
+            return []
+        wanted: dict[tuple[str, str], object] = {}
         for state in self.states.values():
             key = state.instrument.key
-            wanted[key] = FeedInstrument(state.instrument.segment,
-                                         state.instrument.security_id)
+            wanted[key] = make(state.instrument.segment,
+                               state.instrument.security_id)
         # Held instruments too, so open positions can be marked to market.
         for position in self.book.open_positions():
-            wanted[position.key] = FeedInstrument(position.segment, position.security_id)
+            wanted[position.key] = make(position.segment, position.security_id)
         return list(wanted.values())
 
     def on_tick(self, tick: Tick) -> None:
@@ -489,12 +496,8 @@ class TradingEngine:
         await self.warmup()
         await self.adopt_broker_positions()
 
-        if self.token_provider is not None:
-            # A callable, not a captured string: a socket that drops overnight
-            # must reconnect with a current token, not the one it started with.
-            self.feed = DhanFeed(self.settings.dhan_client_id,
-                                 self.token_provider,
-                                 on_tick=self.on_tick)
+        if self.make_feed is not None:
+            self.feed = self.make_feed(self.on_tick)
             self.feed.add(self._subscriptions())
             self._tasks.append(asyncio.create_task(self.feed.run()))
 

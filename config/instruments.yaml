@@ -9,6 +9,11 @@
 # input() defaults in the Pine source, which differ (the source defaults
 # ut_key to 2, the chart runs 3).
 #
+# SECURITY IDS BELOW ARE ANGEL TOKENS (BROKER=angel). Dhan uses different
+# numbers for the same contracts -- NIFTY is 99926000 on Angel and 13 on Dhan.
+# After switching brokers, re-resolve EVERY id with `orbot resolve`. A stale id
+# does not error; it resolves to a real but unrelated instrument.
+#
 # NOTE: every plan is `enabled: false`. Nothing trades until the port clears the
 # validation gate in PLAN.md section 6.
 
@@ -33,7 +38,7 @@ plans:
     enabled: false
     signal:
       exchange_segment: IDX_I
-      security_id: "13"          # NIFTY 50
+      security_id: "99926000"    # NIFTY 50 (Angel token; Dhan uses 13)
       instrument_type: INDEX
       timeframe: 5               # confirm against the chart you actually watch
     strategy:
@@ -62,7 +67,7 @@ plans:
     enabled: false
     signal:
       exchange_segment: IDX_I
-      security_id: "25"          # BANKNIFTY
+      security_id: "99926009"    # BANKNIFTY (Angel token; Dhan uses 25)
       instrument_type: INDEX
       timeframe: 5
     strategy:
@@ -86,7 +91,9 @@ plans:
     enabled: false
     signal:
       exchange_segment: NSE_EQ
-      security_id: "2885"        # RELIANCE — verify with `orbot resolve`
+      security_id: "2885"        # RELIANCE — same id on Angel and Dhan by
+                                 # coincidence. Do not assume that holds for
+                                 # other symbols; re-resolve after any switch.
       instrument_type: EQUITY
       timeframe: 15
     strategy:
