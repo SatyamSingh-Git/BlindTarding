@@ -15,7 +15,8 @@ automatically across equities, futures and options — behind a hard risk-guard 
 | | Read TradingView (webhook) | Recompute locally (CHOSEN) |
 |---|---|---|
 | Latency | 1–3 s | ~50 ms (tick-level) |
-| Cost | $15/mo (Essential + 2FA) | Free |
+| Cost | TradingView Essential ~Rs.1,300/mo | Dhan Data API Rs.499 + GST/mo |
+| Historical data | not included | included |
 | Signal fidelity | Perfect by construction | Must be *proven* by validation |
 | Failure modes | TV outage, no delivery SLA | Our bug, feed drop |
 | Granularity | Bar close only | Tick or bar close, configurable |
@@ -122,7 +123,7 @@ e:\Trade\
 
 ---
 
-## 4. Data layer (Dhan, all free)
+## 4. Data layer (Dhan)
 
 **Live feed** — `wss://api-feed.dhan.co`, 5 connections × 5000 instruments each.
 JSON requests, **binary little-endian responses**. Packet types: LTP, Quote (+OI),
@@ -136,6 +137,24 @@ refreshed daily. Maps tradingsymbol ↔ securityId ↔ exchangeSegment ↔ lot s
 expiry ↔ strike. This is what makes multi-instrument support tractable.
 
 **Rate limits** — orders: 25/sec, 7000/day. Data: 100k/day. We cap far below both.
+
+**Cost — two separate products, easily confused:**
+
+| Product | Cost | Covers |
+|---|---|---|
+| DhanHQ **Trading** APIs | free | orders, positions, funds |
+| DhanHQ **Data** APIs | **Rs.499 + GST/month** | live WebSocket feed, quotes, historical, intraday |
+
+This architecture requires the Data API — recomputing the indicator needs live
+prices and historical bars for warmup. Billed by auto-debit from the trading
+balance, so a thin balance silently lapses the subscription mid-session.
+
+**Account activation is a prerequisite.** Exchange rules restrict live prices to
+registered clients. A newly created Dhan account shows 15-minute delayed data
+until KYC, the Account Opening Form, and exchange registration all complete —
+1-2 business days after documents are approved. Do not subscribe to the Data
+API before then; the monthly charge starts immediately and buys nothing while
+the feed is still delayed.
 
 ---
 

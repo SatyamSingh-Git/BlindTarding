@@ -43,8 +43,16 @@ Dhan's own tick feed.
 | | TradingView webhook | Recompute locally (this repo) |
 |---|---|---|
 | Latency | 1–3 s | ~50 ms, tick-level |
-| Cost | $15/mo (Essential + 2FA) | free |
+| Cost | TradingView Essential ~₹1,300/mo | Dhan Data API ₹499 + GST/mo |
+| Historical data | not included | included |
 | Fidelity | perfect by construction | must be *proven* — see the validation gate |
+
+Note the two Dhan products are easy to confuse: **Trading** APIs (orders,
+positions, funds) are free; **Data** APIs (live feed, quotes, historical) are
+₹499 + GST/month and are what this architecture runs on. Live prices also
+require an exchange-registered account — a freshly opened one shows 15-minute
+delayed data until KYC and exchange registration complete, 1–2 business days
+after document approval.
 
 Screen-scraping the chart was considered and rejected: 5–15 s lag, breaks on
 any UI change, no reliable bar timestamps, no way to tell a fresh signal from a
