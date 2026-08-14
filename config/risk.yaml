@@ -1,0 +1,31 @@
+# Account-wide risk limits. A breach halts everything, not just one plan.
+# These are the numbers that stand between an unattended bot and a bad morning.
+
+# Realised + unrealised loss, in rupees, at which the bot halts and flattens.
+max_daily_loss: 5000.0
+
+# Global cap across all plans.
+max_open_positions: 3
+
+# Fat-finger bounds — a single order may never exceed these.
+max_notional_per_order: 200000.0
+max_qty_per_order: 10000
+
+# Trading on a frozen feed is the classic way to lose money silently. If no tick
+# arrives for this long during market hours, halt rather than act on stale data.
+feed_staleness_seconds: 60
+
+# Reject any signal whose bar is older than this — covers restart replays and
+# webhook retries arriving late.
+signal_staleness_seconds: 120
+
+# How often the local position book is reconciled against Dhan. A mismatch halts
+# and alerts; it means our view of reality is wrong.
+reconcile_interval_seconds: 30
+
+market_open: "09:15"
+market_close: "15:30"
+
+# On halt, also close open positions. Set false to halt new entries but leave
+# existing positions to their own stop-loss.
+flatten_on_halt: true

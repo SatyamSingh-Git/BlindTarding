@@ -1,0 +1,16 @@
+.env
+*.pyc
+__pycache__/
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# runtime data — regenerated daily, never commit
+data/*.csv
+data/*.db
+data/*.db-journal
+data/warmup/
+logs/
+HALT

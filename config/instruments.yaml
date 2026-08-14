@@ -1,0 +1,91 @@
+# Trade plans.
+#
+# The signal instrument and the execution instrument are deliberately separate.
+# The indicator runs on `signal`; `execution` decides what actually gets bought.
+# That split is what lets one engine trade index options, futures and cash.
+#
+# NOTE: every plan below is `enabled: false`. Nothing trades until the Pine port
+# clears the validation gate in PLAN.md section 6.
+
+plans:
+  # --- index options: signal on NIFTY spot, buy an ATM call ---------------
+  - name: nifty-atm-ce
+    enabled: false
+    signal:
+      exchange_segment: IDX_I
+      security_id: "13"          # NIFTY 50
+      instrument_type: INDEX
+      timeframe: 5
+    strategy:
+      preset: svmkr_ut_hma_orb
+      signal_on_bar_close: true  # intrabar signals repaint — see PLAN.md section 5
+      params:
+        # PLACEHOLDERS. Replaced with the real Pine defaults once the source
+        # lands. Do not trade these numbers.
+        ut_key: 1.0
+        ut_atr_period: 10
+        hma_length: 55
+        orb_start: "09:15"
+        orb_end: "09:30"
+    execution:
+      mode: option
+      underlying: NIFTY
+      on_buy:
+        option_type: CE
+        strike: ATM
+        expiry: nearest
+      on_sell: exit             # SELL closes the long and goes flat
+      product: INTRADAY
+      order_type: MARKET
+      qty_lots: 1
+    risk:
+      sl_pct: 25
+      target_pct: 50
+      max_trades_per_day: 4
+      square_off_time: "15:10"
+
+  # --- futures: signal and execution are the same contract ---------------
+  - name: banknifty-fut
+    enabled: false
+    signal:
+      exchange_segment: IDX_I
+      security_id: "25"          # BANKNIFTY
+      instrument_type: INDEX
+      timeframe: 15
+    strategy:
+      preset: svmkr_ut_hma_orb
+      params: {}
+    execution:
+      mode: future
+      underlying: BANKNIFTY
+      on_buy:
+        expiry: nearest_monthly
+      on_sell: exit
+      product: INTRADAY
+      order_type: MARKET
+      qty_lots: 1
+    risk:
+      max_trades_per_day: 3
+      square_off_time: "15:10"
+
+  # --- cash equity: simplest possible mapping ----------------------------
+  - name: reliance-cash
+    enabled: false
+    signal:
+      exchange_segment: NSE_EQ
+      security_id: "2885"        # RELIANCE — verify with `orbot resolve`
+      instrument_type: EQUITY
+      timeframe: 15
+    strategy:
+      preset: svmkr_ut_hma_orb
+      params: {}
+    execution:
+      mode: same
+      on_sell: exit
+      product: INTRADAY
+      order_type: MARKET
+      quantity: 10
+    risk:
+      sl_pct: 1.5
+      max_trades_per_day: 2
+      square_off_time: "15:15"
