@@ -23,8 +23,13 @@ signal_staleness_seconds: 120
 # and alerts; it means our view of reality is wrong.
 reconcile_interval_seconds: 30
 
-market_open: "09:15"
-market_close: "15:30"
+# MCX, not NSE. The commodity session runs 09:00-23:30, and the strategy's
+# entries are spread right across it -- of the 68 silver trades tested, plenty
+# opened at 17:00, 19:00, 21:00 and 23:00. NSE's 15:30 close would have
+# blocked all of them at the market-hours guard.
+# Change these back to 09:15/15:30 before enabling any NSE equity or index plan.
+market_open: "09:00"
+market_close: "23:30"
 
 # On halt, also close open positions. Set false to halt new entries but leave
 # existing positions to their own stop-loss.

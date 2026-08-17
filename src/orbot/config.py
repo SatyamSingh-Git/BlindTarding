@@ -151,6 +151,11 @@ class SignalConfig(BaseModel):
 
 class StrategyConfig(BaseModel):
     preset: str = "svmkr_ut_hma_orb"
+    # A timeframe the broker does not serve natively is built by resampling,
+    # and a resampler anchored to the wrong session start silently trades a
+    # different chart. The engine therefore refuses such a plan unless someone
+    # has actually checked the bars against the chart and says so here.
+    resampling_validated: bool = False
     # Anything omitted falls back to the values read off the live chart legend
     # ("3 1 31 5 1010-1015"), NOT the Pine input() defaults — the source
     # defaults ut_key to 2 where the chart runs 3.
@@ -181,8 +186,16 @@ class ExecutionConfig(BaseModel):
 class PlanRisk(BaseModel):
     sl_pct: float | None = None
     target_pct: float | None = None
+    # Absolute-point bracket. Preferred over the _pct pair for futures: a stop
+    # validated at "50 points" stays 50 points as the contract moves, whereas
+    # 2.12% of 2,363 silently becomes a different stop at 2,800.
+    sl_points: float | None = None
+    target_points: float | None = None
     max_trades_per_day: int = 4
-    square_off_time: dt.time = dt.time(15, 10)
+    # None means "hold across sessions". A 2-hour plan can stay in a position
+    # for days — forcing it flat every afternoon is a different strategy, not a
+    # safety net. Intraday plans should still set a time.
+    square_off_time: dt.time | None = dt.time(15, 10)
 
 
 class TradePlan(BaseModel):

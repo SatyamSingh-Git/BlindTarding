@@ -880,17 +880,20 @@ def _build_context(mode: str | None = None):
 
     underlyings = [p.execution.underlying for p in plans_cfg
                    if p.enabled and p.execution.underlying]
-    registry = _registry(underlyings=underlyings or None)
 
-    client = None
+    # Go through the factory rather than naming a broker here. Building
+    # DhanClient directly ignored BROKER=angel entirely, so `run` and `status`
+    # went to Dhan no matter what the settings said — and with no Dhan token
+    # configured that surfaced as an auth error rather than as "wrong broker".
+    client = registry = make_feed = feed_instrument = None
     if not settings.missing_credentials():
-        client = DhanClient(
-            settings.dhan_client_id, _token_manager(settings),
-            order_proxy=settings.dhan_order_proxy or None,
-            proxy_data_calls=settings.proxy_data_calls,
-            max_orders_per_second=settings.max_orders_per_second,
-            max_orders_per_day=settings.max_orders_per_day,
-        )
+        bundle = build_broker(settings, underlyings=underlyings or None,
+                              refresh_instruments=False)
+        client, registry = bundle.client, bundle.registry
+        make_feed, feed_instrument = bundle.make_feed, bundle.feed_instrument
+    if registry is None:
+        registry = _registry(underlyings=underlyings or None)
+
     oms = build_oms(settings.trade_mode, client,
                     starting_funds=settings.paper_capital,
                     slippage_pct=settings.paper_slippage_pct)
@@ -898,7 +901,7 @@ def _build_context(mode: str | None = None):
         settings=settings, plans=plans_cfg, risk=risk, registry=registry,
         client=client, oms=oms, journal=journal, notifier=notifier,
         killswitch=killswitch, calendar=calendar,
-        token_provider=(_token_manager(settings).token if client else None),
+        make_feed=make_feed, feed_instrument=feed_instrument,
     )
     return settings, engine, journal
 

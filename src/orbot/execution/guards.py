@@ -217,6 +217,8 @@ class GuardChain:
         if ctx.plan is None:
             return GuardResult.ok()
         cutoff = ctx.plan.risk.square_off_time
+        if cutoff is None:          # plan holds across sessions; no cutoff
+            return GuardResult.ok()
         if ctx.now.time() >= cutoff:
             return GuardResult(False, "square_off_window",
                                f"past the {cutoff:%H:%M} square-off cutoff")

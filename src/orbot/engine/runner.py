@@ -63,6 +63,9 @@ class PlanState:
     strategy: SvmkrUtHmaOrb
     resolver: ExecutionResolver
     position_key: tuple[str, str] | None = None   # what this plan currently holds
+    # Latched once a bracket exit is scheduled, so the ticks that keep arriving
+    # while the exit order is in flight cannot queue a second flatten.
+    bracket_fired: bool = False
     trades_today: int = 0
     last_signal_bar: dt.datetime | None = None
     signals_seen: int = 0
@@ -148,11 +151,13 @@ class TradingEngine:
             problems.append("no enabled plans — nothing to run")
         for state in self.states.values():
             problems.extend(state.resolver.validate())
-            if not state.timeframe.is_native:
+            if (not state.timeframe.is_native
+                    and not state.plan.strategy.resampling_validated):
                 problems.append(
-                    f"plan {state.name!r} uses {state.timeframe.label}, which is "
-                    "resampled rather than served natively by Dhan — validate its "
-                    "bar alignment against the chart before trading it"
+                    f"plan {state.name!r} uses {state.timeframe.label}, which the "
+                    "broker does not serve natively and which is therefore built "
+                    "by resampling. Check its bars against the chart, then set "
+                    "strategy.resampling_validated: true to accept them"
                 )
         return problems
 
@@ -222,11 +227,52 @@ class TradingEngine:
         self.last_prices[tick.key] = tick.ltp
         self.book.mark(tick.key, tick.ltp)
         for state in self.states.values():
+            # A bracket is checked against the *executed* contract, which is
+            # rarely the signal instrument — a NIFTY plan signals on the index
+            # and holds an option.
+            if state.position_key == tick.key:
+                self._check_bracket(state, tick.ltp)
             if state.instrument.key != tick.key:
                 continue
             closed = state.series.on_tick(tick)
             if closed is not None:
                 self._queue_bar(state, closed)
+
+    def _check_bracket(self, state: PlanState, price: float) -> None:
+        """Fire the fixed stop / target between bar closes.
+
+        Checked on every tick rather than at bar close: a 2-hour bar is a long
+        time to sit past your stop, and the backtest that chose these levels
+        assumed the stop triggers when price touches it, not hours later.
+        """
+        risk = state.plan.risk
+        if state.bracket_fired or state.position_key is None:
+            return
+        if risk.sl_points is None and risk.target_points is None:
+            return
+        position = self.book.get(state.position_key)
+        if position is None or position.net_qty == 0 or position.avg_price <= 0:
+            return
+        long = position.net_qty > 0
+        entry = position.avg_price
+        hit: str | None = None
+        if risk.sl_points is not None:
+            stop = entry - risk.sl_points if long else entry + risk.sl_points
+            if (price <= stop) if long else (price >= stop):
+                hit = f"stop {stop:,.2f}"
+        if hit is None and risk.target_points is not None:
+            target = entry + risk.target_points if long else entry - risk.target_points
+            if (price >= target) if long else (price <= target):
+                hit = f"target {target:,.2f}"
+        if hit is None:
+            return
+        # Latch before scheduling: ticks keep arriving while the exit order is
+        # in flight, and a second flatten would try to sell what is already sold.
+        state.bracket_fired = True
+        log.warning("engine.bracket_hit", plan=state.name, entry=entry,
+                    price=price, hit=hit)
+        self._tasks.append(asyncio.create_task(
+            self.flatten(f"{state.name} {hit} hit at {price:,.2f}")))
 
     def _queue_bar(self, state: PlanState, candle: Candle) -> None:
         # Bar handling touches the broker, so it runs as a task rather than
@@ -294,6 +340,7 @@ class TradingEngine:
         position = self.book.get(state.position_key)  # type: ignore[arg-type]
         if position is None or position.net_qty == 0:
             state.position_key = None
+            state.bracket_fired = False
             return
         try:
             intent = state.resolver.resolve_exit(position, signal=signal)
@@ -348,6 +395,7 @@ class TradingEngine:
             self.notifier.order_filled(order, name=intent.instrument.display_name)
             state.trades_today += 1
             position = self.book.get(intent.instrument.key)
+            state.bracket_fired = False
             state.position_key = (intent.instrument.key
                                   if position and position.net_qty != 0 else None)
             if is_exit and state.position_key is None:
@@ -416,6 +464,7 @@ class TradingEngine:
                     self.book.apply_fill(intent, order)
                     if state:
                         state.position_key = None
+                        state.bracket_fired = False
             except Exception as exc:
                 log.exception("engine.flatten_failed", position=position.key)
                 self.notifier.error("flatten failed",
@@ -448,10 +497,12 @@ class TradingEngine:
             for state in self.states.values():
                 if state.is_flat:
                     continue
-                if now.time() >= state.plan.risk.square_off_time:
+                cutoff = state.plan.risk.square_off_time
+                if cutoff is None:      # plan holds across sessions
+                    continue
+                if now.time() >= cutoff:
                     log.warning("engine.square_off", plan=state.name)
-                    await self.flatten(f"{state.name} square-off "
-                                       f"{state.plan.risk.square_off_time:%H:%M}")
+                    await self.flatten(f"{state.name} square-off {cutoff:%H:%M}")
 
     async def _bar_clock(self) -> None:
         """Close bars on the clock so a signal does not wait for the next trade."""

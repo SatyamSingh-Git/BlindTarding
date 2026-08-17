@@ -109,3 +109,84 @@ plans:
       sl_pct: 1.5
       max_trades_per_day: 2
       square_off_time: "15:15"
+
+  # --- MCX GOLD MINI futures, 2-hour ---------------------------------------
+  # Signal and execution are the same contract: no option leg, no strike
+  # selection, just the future the indicator is computed on.
+  #
+  # square_off_time is null on purpose. This plan holds for days -- the 400-day
+  # test's best trade ran 6 Aug to 13 Aug. Flattening every afternoon would be
+  # a different strategy than the one that was validated.
+  #
+  # Stop is 2,000 points (Rs 20,000 on one 100-qty lot). Chosen from the
+  # maximum-adverse-excursion distribution, not the P&L sweep: no winning trade
+  # in 400 days dipped more than 2,178 points, while losers reached 7,532.
+  # No target -- on gold a target added nothing; profit was flat above a
+  # 1,800-point stop and only the drawdown improved.
+  - name: goldm-2h
+    enabled: true
+    signal:
+      exchange_segment: MCX_COMM
+      security_id: "563946"      # GOLDM 04SEP2026 FUT (Angel token)
+      instrument_type: FUTCOM
+      timeframe: 2h
+    strategy:
+      preset: svmkr_ut_hma_orb
+      signal_on_bar_close: true
+      # 2h is resampled from Angel's 1h bars, anchored to the MCX 09:00 open.
+      # This is the exact construction the 400-day study ran on, and its bars
+      # were checked against the chart (see docs/FINDINGS-2026-08-15.md).
+      resampling_validated: true
+      params: *svmkr_params
+    execution:
+      mode: same
+      underlying: GOLDM
+      on_sell: exit
+      product: MARGIN           # carry-forward; INTRADAY would be auto-squared
+      order_type: MARKET
+      quantity: 100             # 1 lot = Rs 10 per point
+    risk:
+      sl_points: 2000
+      max_trades_per_day: 4
+      square_off_time: null
+
+  # --- MCX SILVER100 futures, 2-hour ---------------------------------------
+  # The best configuration found: over 400 days this returned +296% on
+  # Rs 1.5 lakh with a Rs 57,379 worst drawdown (return/drawdown 7.73), and
+  # unlike gold it beat buy-and-hold.
+  #
+  # 50-point stop / 250-point target is the tested 1:5. A 13-point stop was
+  # tried and rejected: 82% of trades dip more than 13 points, so four in five
+  # were ejected before they could work, and 2 ticks of slippage cost 67% of
+  # the profit. At 50 points slippage costs 11%.
+  #
+  # Only 8 of 68 trades ever reached the target -- most exit on the
+  # indicator's own SELL. The target caps the rare monster; it does not define
+  # the trade.
+  - name: silver100-2h
+    enabled: true
+    signal:
+      exchange_segment: MCX_COMM
+      security_id: "574823"      # SILVER100 31AUG2026 FUT (Angel token)
+      instrument_type: FUTCOM
+      timeframe: 2h
+    strategy:
+      preset: svmkr_ut_hma_orb
+      signal_on_bar_close: true
+      # 2h is resampled from Angel's 1h bars, anchored to the MCX 09:00 open.
+      # This is the exact construction the 400-day study ran on, and its bars
+      # were checked against the chart (see docs/FINDINGS-2026-08-15.md).
+      resampling_validated: true
+      params: *svmkr_params
+    execution:
+      mode: same
+      underlying: SILVER100
+      on_sell: exit
+      product: MARGIN
+      order_type: MARKET
+      quantity: 200             # 2 lots = Rs 200 per point
+    risk:
+      sl_points: 50
+      target_points: 250
+      max_trades_per_day: 4
+      square_off_time: null
