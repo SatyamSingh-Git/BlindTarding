@@ -444,3 +444,48 @@ class TestExchangeHours:
         ctx = self._ctx(23, ExchangeSegment.MCX_COMM)
         ctx.now = dt.datetime(2026, 8, 17, 23, 45)
         assert not chain._market_open(ctx).allowed
+
+
+class TestAdoptedPositionsKeepTheirMultiplier:
+    """An adopted position never passes through apply_fill. Without the
+    multiplier the book marks it 1:1 -- which showed a Rs 6,180 loss on gold
+    as Rs 65,900."""
+
+    @staticmethod
+    def _position(qty=100, avg=154_187.0):
+        from orbot.models import Position
+        return Position(security_id=GOLDM.security_id, segment=GOLDM.segment,
+                        net_qty=qty, avg_price=avg)
+
+    def test_marking_without_a_multiplier_is_ten_times_wrong(self):
+        from orbot.execution.positions import PositionBook
+        book = PositionBook()
+        book.adopt([self._position()])                    # no multiplier given
+        book.mark(GOLDM.key, 153_569.0)
+        assert book.unrealised == pytest.approx(-61_800.0)   # the wrong number
+
+    def test_adopt_with_a_multiplier_marks_correctly(self):
+        from orbot.execution.positions import PositionBook
+        book = PositionBook()
+        book.adopt([self._position()], multiplier_for=lambda k: 0.1)
+        book.mark(GOLDM.key, 153_569.0)
+        # 618 points down x 100 qty x 0.1 = Rs 6,180
+        assert book.unrealised == pytest.approx(-6_180.0)
+
+    def test_a_missing_multiplier_is_announced_not_assumed(self, capsys):
+        """structlog writes to stdout, so capsys is what sees it."""
+        from orbot.execution.positions import PositionBook
+        book = PositionBook()
+        book.adopt([self._position()])
+        book.mark(GOLDM.key, 153_569.0)
+        assert "no_multiplier" in capsys.readouterr().out, (
+            "marked 1:1 without saying so")
+
+    def test_the_warning_is_not_repeated_per_tick(self, capsys):
+        """mark() runs on every tick; a warning per tick would bury the log."""
+        from orbot.execution.positions import PositionBook
+        book = PositionBook()
+        book.adopt([self._position()])
+        for price in (153_569.0, 153_570.0, 153_571.0):
+            book.mark(GOLDM.key, price)
+        assert capsys.readouterr().out.count("no_multiplier") == 1

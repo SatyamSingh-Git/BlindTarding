@@ -33,7 +33,7 @@ import structlog
 from ..broker.dhan_client import OrderStateUnknown
 from ..broker.instruments import InstrumentRegistry
 from ..config import GlobalRisk, Settings, TradePlan
-from ..constants import IST
+from ..constants import IST, ExchangeSegment
 from ..execution.guards import GuardChain, GuardContext, GuardResult
 from ..execution.oms import OMS
 from ..execution.positions import PositionBook
@@ -213,7 +213,16 @@ class TradingEngine:
         """
         positions = await asyncio.to_thread(self.oms.positions)
         if positions:
-            self.book.adopt(positions)
+            # An adopted position never passes through apply_fill, so the book
+            # has no way to know a GOLDM point is worth Rs 10 rather than
+            # Rs 100 unless it is told here.
+            def multiplier_for(key: tuple[str, str]) -> float:
+                try:
+                    return self.registry.get(ExchangeSegment(key[0]),
+                                             key[1]).price_multiplier
+                except Exception:
+                    return 1.0
+            self.book.adopt(positions, multiplier_for=multiplier_for)
             self.notifier.send(
                 "adopted existing positions at startup:\n"
                 + "\n".join(f"{p.security_id} {p.net_qty:+d} @ {p.avg_price:,.2f}"

@@ -54,6 +54,7 @@ class PositionBook:
     def __init__(self) -> None:
         self._positions: dict[PositionKey, Position] = {}
         self._multipliers: dict[PositionKey, float] = {}
+        self._warned_multipliers: set[PositionKey] = set()
         self._names: dict[PositionKey, str] = {}
         # How much of each order has already been folded in, keyed by the
         # order's identity. Held here rather than on the Order object: the book
@@ -128,8 +129,19 @@ class PositionBook:
         # Through the contract multiplier, or MCX gold reads ten times too big:
         # GOLDM is 100 g quoted per 10 g, so a point is worth Rs 10 on a
         # 100-quantity lot, not Rs 100.
-        position.unrealised = (position.net_qty * (last_price - position.avg_price)
-                               * self._multipliers.get(key, 1.0))
+        multiplier = self._multipliers.get(key)
+        if multiplier is None:
+            # Defaulting quietly to 1 is how gold read ten times its real loss
+            # for an afternoon. Say so, once per instrument.
+            if key not in self._warned_multipliers:
+                self._warned_multipliers.add(key)
+                log.warning("position.no_multiplier", instrument=key[1],
+                            detail="marking at 1:1; P&L will be wrong for any "
+                                   "contract whose quote unit differs from its "
+                                   "quantity unit")
+            multiplier = 1.0
+        position.unrealised = (position.net_qty
+                               * (last_price - position.avg_price) * multiplier)
 
     # --- access ----------------------------------------------------------
     def get(self, key: PositionKey) -> Position | None:
@@ -175,14 +187,23 @@ class PositionBook:
                       detail="; ".join(str(m) for m in mismatches))
         return ReconcileResult(not mismatches, mismatches, broker_positions)
 
-    def adopt(self, broker_positions: list[Position]) -> None:
+    def adopt(self, broker_positions: list[Position],
+              *, multiplier_for: Callable[[PositionKey], float] | None = None) -> None:
         """Replace the local book with the broker's view.
 
         Only ever called deliberately — at startup, or by a human resolving a
         mismatch. Never automatically on a discrepancy, because silently
         adopting the broker's numbers would hide the bug that caused the drift.
+
+        `multiplier_for` is not optional in spirit: an adopted position never
+        passes through apply_fill, so without it the contract multiplier is
+        unknown and mark() falls back to 1. That read a Rs 6,180 loss on gold
+        as Rs 65,900.
         """
         self._positions = {p.key: p for p in broker_positions if p.net_qty != 0}
+        if multiplier_for is not None:
+            for key in self._positions:
+                self._multipliers[key] = multiplier_for(key)
         log.warning("position.adopted", count=len(self._positions))
 
 
