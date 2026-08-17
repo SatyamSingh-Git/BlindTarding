@@ -33,7 +33,7 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from ..config import GlobalRisk, TradePlan
-from ..constants import IST
+from ..constants import IST, OPTION_TYPES, InstrumentType, TransactionType
 from ..models import OrderIntent, Position, Signal
 from ..ops.journal import Journal
 from ..ops.killswitch import KillSwitch
@@ -82,6 +82,17 @@ class GuardContext:
     @property
     def total_pnl(self) -> float:
         return self.realised_pnl + self.unrealised_pnl
+
+
+def _exposure(intent: OrderIntent, price: float) -> float:
+    """Rupees actually at risk in a contract, not quantity times quote.
+
+    MCX gold is quoted per 10 g while quantity is in grams, so 100 of GOLDM at
+    153,327 is Rs 15.3 lakh of gold rather than Rs 15.3 crore. Taking the
+    quote literally made a Rs 2 lakh notional cap reject every gold order it
+    ever saw a price for.
+    """
+    return price * intent.quantity * intent.instrument.price_multiplier
 
 
 GuardFn = Callable[[GuardContext], GuardResult]
@@ -293,12 +304,20 @@ class GuardChain:
                                f"quantity {intent.quantity} exceeds cap "
                                f"{self.risk.max_qty_per_order}")
         reference = ctx.reference_price or intent.price
-        if reference > 0:
-            notional = reference * intent.quantity
-            if notional > self.risk.max_notional_per_order:
-                return GuardResult(False, "fat_finger",
-                                   f"notional Rs.{notional:,.0f} exceeds cap "
-                                   f"Rs.{self.risk.max_notional_per_order:,.0f}")
+        if reference <= 0:
+            # No usable price. Blocking an *entry* here is the point: sizing a
+            # new position against an unknown price is how a lot-size misread
+            # reaches the exchange. An exit is the opposite — it reduces risk,
+            # and must never be held up for want of a quote.
+            if intent.signal is not None and intent.signal.action != "BUY":
+                return GuardResult.ok()
+            return GuardResult(False, "fat_finger",
+                               "no reference price to size this order against")
+        notional = _exposure(intent, reference)
+        if notional > self.risk.max_notional_per_order:
+            return GuardResult(False, "fat_finger",
+                               f"exposure Rs.{notional:,.0f} exceeds cap "
+                               f"Rs.{self.risk.max_notional_per_order:,.0f}")
         return GuardResult.ok()
 
     def _sufficient_funds(self, ctx: GuardContext) -> GuardResult:
@@ -317,8 +336,16 @@ class GuardChain:
                                "send an order against an unknown balance")
         reference = ctx.reference_price or intent.price
         if reference <= 0:
-            return GuardResult.ok()   # market order with no usable estimate
-        needed = reference * intent.quantity
+            return GuardResult(False, "insufficient_funds",
+                               "no reference price — cannot tell whether this "
+                               "order is affordable")
+        # A future blocks margin; a long option costs its whole premium.
+        exposure = _exposure(intent, reference)
+        kind = intent.instrument.instrument_type
+        long_option = (kind in OPTION_TYPES
+                       and intent.transaction_type is TransactionType.BUY)
+        needed = (exposure if (long_option or kind is InstrumentType.EQUITY)
+                  else exposure * self.risk.assumed_margin_pct)
         if needed > ctx.available_funds:
             return GuardResult(False, "insufficient_funds",
                                f"need about Rs.{needed:,.0f}, available "

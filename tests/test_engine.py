@@ -102,6 +102,19 @@ def make_plan(**overrides) -> TradePlan:
     return TradePlan(**base)
 
 
+class PricedClient:
+    """Enough broker to answer "what is this contract worth right now?".
+
+    An option strike is resolved at signal time and never subscribed, so it
+    never appears in the tick feed. Production prices it with an LTP call
+    before sizing the order; a None client here would mean the engine is
+    tested in a state it never actually runs in.
+    """
+
+    def ltp(self, instrument):
+        return 100.0
+
+
 @pytest.fixture
 def engine(tmp_path, registry):
     journal = Journal(tmp_path / "j.db")
@@ -113,7 +126,7 @@ def engine(tmp_path, registry):
         risk=GlobalRisk(max_daily_loss=5000.0, max_open_positions=3,
                         feed_staleness_seconds=60, signal_staleness_seconds=120),
         registry=registry,
-        client=None,
+        client=PricedClient(),
         oms=PaperOMS(starting_funds=500_000.0, slippage_pct=0.0),
         journal=journal,
         notifier=notifier,

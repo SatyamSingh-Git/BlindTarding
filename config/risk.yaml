@@ -8,8 +8,20 @@ max_daily_loss: 5000.0
 max_open_positions: 3
 
 # Fat-finger bounds — a single order may never exceed these.
-max_notional_per_order: 200000.0
+#
+# Sized for the largest legitimate order, which is now a commodity future, not
+# a NIFTY option. One GOLDM lot is 100 g of gold: about Rs 15.3 lakh of
+# exposure at current prices. The old Rs 2 lakh cap would have rejected every
+# gold order the moment a reference price existed to measure one against.
+# Rs 25 lakh still catches a 10x lot-size misread, which is the mistake this
+# guard exists for.
+max_notional_per_order: 2500000.0
 max_qty_per_order: 10000
+
+# Assumed exchange margin on a derivative, used only to size the pre-trade
+# funds check. MCX runs roughly 6% on gold and 11% on silver; 15% leaves room
+# for a margin hike without blocking an affordable trade.
+assumed_margin_pct: 0.15
 
 # Trading on a frozen feed is the classic way to lose money silently. If no tick
 # arrives for this long during market hours, halt rather than act on stale data.

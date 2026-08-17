@@ -262,6 +262,26 @@ class TradingEngine:
                             detail="stop stays at the signal's level, so the "
                                    "risk from this fill is larger than planned")
             ctx = await self._context(state, signal)
+            # Adoption is a real entry and must clear the same gate every other
+            # entry does. Calling _enter() directly skipped the kill switch,
+            # market hours, feed freshness, the duplicate check, the daily loss
+            # cap and the position limits -- nine guards, bypassed at startup,
+            # which is the least supervised moment the bot has.
+            verdict = self.guards.check_signal(ctx)
+            if not verdict.allowed:
+                log.warning("engine.adopt_blocked", plan=state.name,
+                            guard=verdict.guard, detail=verdict.detail)
+                self.notifier.guard_blocked(verdict.guard, verdict.detail,
+                                            plan=state.name)
+                await self._maybe_halt(verdict)
+                continue
+            try:
+                self.journal.record_signal(signal)
+            except DuplicateSignal:
+                log.info("engine.adopt_duplicate", plan=state.name,
+                         key=signal.dedupe_key,
+                         detail="already acted on this signal in an earlier run")
+                continue
             await self._enter(state, signal, ctx)
             # Measure the bracket from the signal, not from today's fill, so the
             # trade keeps the risk geometry it was tested with.
@@ -412,6 +432,29 @@ class TradingEngine:
     async def _send(self, state: PlanState, intent, ctx: GuardContext,
                     *, is_exit: bool = False) -> None:
         reference = self.last_prices.get(intent.instrument.key)
+        if (reference is None and intent.signal is not None
+                and intent.instrument.key == state.instrument.key):
+            # Fall back to the signal's price *before* the guards run, not
+            # after: at startup no tick has arrived, and the notional and funds
+            # checks need a price to mean anything.
+            #
+            # Only when the traded contract IS the signal contract. An option
+            # plan signals on the index and buys a strike, so the signal's
+            # price is NIFTY at 24,287 while the option trades near 100 —
+            # borrowing it would overstate the exposure fifteenfold.
+            reference = intent.signal.price
+        if reference is None and self.client is not None:
+            # Nothing in the feed for this contract. An option strike is
+            # resolved at signal time and never subscribed, so this is the
+            # normal case there — ask the broker rather than send an order
+            # against a price we do not have.
+            try:
+                reference = await asyncio.to_thread(self.client.ltp,
+                                                    intent.instrument)
+            except Exception as exc:
+                log.warning("engine.ltp_failed", plan=state.name,
+                            instrument=intent.instrument.display_name,
+                            error=str(exc))
         ctx.intent = intent
         ctx.reference_price = reference
 
@@ -420,11 +463,6 @@ class TradingEngine:
             self.notifier.guard_blocked(verdict.guard, verdict.detail, plan=state.name)
             await self._maybe_halt(verdict)
             return
-
-        if reference is None and self.oms.mode == "paper":
-            # Paper fills need a price; the signal price is the honest stand-in
-            # for an instrument we have not seen tick yet.
-            reference = intent.signal.price if intent.signal else 0.0
 
         try:
             order = await asyncio.to_thread(self.oms.place, intent,

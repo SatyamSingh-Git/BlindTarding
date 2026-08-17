@@ -216,6 +216,11 @@ class GlobalRisk(BaseModel):
     """Account-wide limits. Any breach halts everything, not just one plan."""
 
     max_daily_loss: float = 5000.0
+    # What fraction of a derivative's contract value the exchange will block.
+    # Used only to size the pre-trade funds check; the broker's own number
+    # governs the real order. Deliberately generous, because blocking an
+    # affordable trade is cheaper than sending an unaffordable one.
+    assumed_margin_pct: float = 0.20
     max_open_positions: int = 3
     max_notional_per_order: float = 200_000.0
     max_qty_per_order: int = 10_000
