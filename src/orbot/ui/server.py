@@ -46,6 +46,17 @@ def _journal(path: Path) -> sqlite3.Connection | None:
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
 
 
+
+def _plans_segment(plans) -> object | None:
+    """The exchange the enabled plans trade, when they agree on one.
+
+    Reporting NSE hours by default told the dashboard the market was shut at
+    17:00 while the MCX plans it was displaying traded on until 23:30.
+    """
+    segments = {p.signal.exchange_segment for p in plans if p.enabled}
+    return segments.pop() if len(segments) == 1 else None
+
+
 def build_state() -> dict[str, Any]:
     """Everything the page needs, in one snapshot."""
     settings = get_settings()
@@ -55,15 +66,16 @@ def build_state() -> dict[str, Any]:
     switch = KillSwitch(HALT_FILE)
     halt = switch.state()
     now = dt.datetime.now(IST_TZ)
+    _seg = _plans_segment(plans)
 
     state: dict[str, Any] = {
         "now": now.isoformat(),
         "broker": settings.broker,
         "mode": settings.trade_mode,
         "is_live": settings.is_live,
-        "market": calendar.describe(now),
-        "market_open": calendar.is_open(now),
-        "minutes_to_close": round(calendar.minutes_to_close(now), 1),
+        "market": calendar.describe(now, _seg),
+        "market_open": calendar.is_open(now, _seg),
+        "minutes_to_close": round(calendar.minutes_to_close(now, _seg), 1),
         "halted": halt.halted,
         "halt_reason": halt.reason,
         "halt_source": halt.source,
@@ -150,10 +162,11 @@ def health() -> dict[str, Any]:
     settings = get_settings()
     calendar = MarketCalendar.load(CONFIG_DIR / "calendar.yaml")
     now = dt.datetime.now(IST_TZ)
+    _seg = _plans_segment(load_plans())
     out: dict[str, Any] = {
-        "market_open": calendar.is_open(now),
-        "market": calendar.describe(now),
-        "minutes_to_close": round(calendar.minutes_to_close(now), 1),
+        "market_open": calendar.is_open(now, _seg),
+        "market": calendar.describe(now, _seg),
+        "minutes_to_close": round(calendar.minutes_to_close(now, _seg), 1),
         "static_ip_proxy": bool(settings.dhan_order_proxy),
         "token": "unknown",
         "token_ok": False,
