@@ -557,3 +557,53 @@ class TestNseBseClassification:
         assert parse_row({"token": "26000", "symbol": "NIFTY", "name": "NIFTY",
                           "instrumenttype": "", "exch_seg": "NSE",
                           "strike": "-1", "lotsize": "1"}) is None
+
+
+class TestRateLimitRetry:
+    """Angel answers a breached rate limit with 403 and an HTML body. That used
+    to kill the engine during warmup, before it had placed a single order,
+    while a genuine authorisation 403 must still fail fast."""
+
+    @staticmethod
+    def _client(monkeypatch):
+        from orbot.broker.angel.client import AngelClient
+
+        auth = AngelAuth("C1", "key")
+        monkeypatch.setattr(type(auth), "auth_headers", lambda self: {})
+        return AngelClient(auth)
+
+    def test_html_403_is_retried(self, monkeypatch):
+        from orbot.broker.angel import client as mod
+
+        calls = {"n": 0}
+
+        def _request(self, method, path, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(403, text="<html>rate limit</html>",
+                                      request=httpx.Request(method, path))
+            return httpx.Response(200, json={"status": True, "data": {"ok": 1}},
+                                  request=httpx.Request(method, path))
+
+        monkeypatch.setattr(httpx.Client, "request", _request)
+        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        assert self._client(monkeypatch)._call("POST", "/x") == {"ok": 1}
+        assert calls["n"] == 2
+
+    def test_json_403_fails_immediately(self, monkeypatch):
+        from orbot.broker.angel import client as mod
+        from orbot.broker.dhan_client import DhanAPIError
+
+        calls = {"n": 0}
+
+        def _request(self, method, path, **kw):
+            calls["n"] += 1
+            return httpx.Response(403, json={"status": False,
+                                             "message": "Invalid token"},
+                                  request=httpx.Request(method, path))
+
+        monkeypatch.setattr(httpx.Client, "request", _request)
+        monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+        with pytest.raises(DhanAPIError):
+            self._client(monkeypatch)._call("POST", "/x")
+        assert calls["n"] == 1

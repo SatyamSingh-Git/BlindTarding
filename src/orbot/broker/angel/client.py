@@ -97,6 +97,19 @@ _STATUS_MAP = {
 }
 
 
+def _is_json(resp: httpx.Response) -> bool:
+    """Whether a response carries a JSON body at all.
+
+    Used to tell Angel's rate-limit 403 (HTML) from a genuine authorisation
+    403 (JSON): the first is worth retrying, the second never is.
+    """
+    try:
+        resp.json()
+    except ValueError:
+        return False
+    return True
+
+
 class AngelClient:
     def __init__(
         self,
@@ -156,6 +169,14 @@ class AngelClient:
                 raise DhanAPIError(f"{method} {path} failed: {exc}") from exc
             if resp.status_code >= 500 and attempt < retries:
                 time.sleep(0.4 * (2 ** attempt))
+                continue
+            # Angel answers a breached rate limit with 403 and an HTML body,
+            # where a real authorisation failure comes back as JSON. Retrying
+            # the former matters: an unlucky burst during warmup used to kill
+            # the engine outright, before it had placed a single order.
+            if (resp.status_code in (403, 429) and attempt < retries
+                    and not _is_json(resp)):
+                time.sleep(1.5 * (2 ** attempt))
                 continue
             return self._unwrap(resp, method, path)
         raise DhanAPIError(f"{method} {path} exhausted retries: {last}")
