@@ -53,6 +53,7 @@ class ReconcileResult:
 class PositionBook:
     def __init__(self) -> None:
         self._positions: dict[PositionKey, Position] = {}
+        self._multipliers: dict[PositionKey, float] = {}
         self._names: dict[PositionKey, str] = {}
         # How much of each order has already been folded in, keyed by the
         # order's identity. Held here rather than on the Order object: the book
@@ -69,6 +70,8 @@ class PositionBook:
         unchanged state cannot double-count, and a partial fill that later
         completes adds only the remainder.
         """
+        self._multipliers[intent.instrument.key] = (
+            intent.instrument.price_multiplier)
         key = intent.instrument.key
         self._names[key] = intent.instrument.display_name
         position = self._positions.get(key)
@@ -100,7 +103,9 @@ class PositionBook:
             # Closing out, possibly flipping.
             closed = min(abs(delta), abs(position.net_qty))
             direction = 1 if position.net_qty > 0 else -1
-            position.realised += direction * closed * (order.avg_price - position.avg_price)
+            position.realised += (direction * closed
+                                  * (order.avg_price - position.avg_price)
+                                  * intent.instrument.price_multiplier)
             if new_qty == 0:
                 position.avg_price = 0.0
             elif (new_qty > 0) != (position.net_qty > 0):
@@ -113,11 +118,18 @@ class PositionBook:
                  realised=round(position.realised, 2))
         return position
 
+    def set_multiplier(self, key: PositionKey, value: float) -> None:
+        self._multipliers[key] = value
+
     def mark(self, key: PositionKey, last_price: float) -> None:
         position = self._positions.get(key)
         if position is None or position.net_qty == 0:
             return
-        position.unrealised = position.net_qty * (last_price - position.avg_price)
+        # Through the contract multiplier, or MCX gold reads ten times too big:
+        # GOLDM is 100 g quoted per 10 g, so a point is worth Rs 10 on a
+        # 100-quantity lot, not Rs 100.
+        position.unrealised = (position.net_qty * (last_price - position.avg_price)
+                               * self._multipliers.get(key, 1.0))
 
     # --- access ----------------------------------------------------------
     def get(self, key: PositionKey) -> Position | None:

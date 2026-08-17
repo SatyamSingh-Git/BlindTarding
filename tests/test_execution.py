@@ -528,3 +528,44 @@ class TestPaperFundsByProduct:
         assert oms.positions() == []
         # 100 points at Rs 10 a point = Rs 1,000, and every rupee of margin back
         assert oms.available_funds() == pytest.approx(301_000.0)
+
+
+class TestPositionBookMultiplier:
+    """Mark-to-market must go through the contract multiplier, or the header
+    P&L reads ten times too big on MCX gold."""
+
+    @staticmethod
+    def _intent(symbol, qty):
+        from orbot.constants import (ExchangeSegment, InstrumentType, OrderType,
+                                     ProductType, TransactionType)
+        from orbot.models import Instrument, OrderIntent
+        inst = Instrument(security_id="1", segment=ExchangeSegment.MCX_COMM,
+                          symbol=symbol, display_name=symbol,
+                          instrument_type=InstrumentType.FUTCOM, lot_size=100)
+        return OrderIntent(instrument=inst,
+                           transaction_type=TransactionType.BUY, quantity=qty,
+                           order_type=OrderType.MARKET,
+                           product_type=ProductType.MARGIN, plan="p")
+
+    @staticmethod
+    def _order(qty, price):
+        from orbot.constants import OrderStatus
+        from orbot.models import Order
+        return Order(order_id="o1", status=OrderStatus.TRADED,
+                     filled_qty=qty, avg_price=price)
+
+    def test_gold_marks_at_ten_rupees_a_point(self):
+        from orbot.execution.positions import PositionBook
+        book = PositionBook()
+        intent = self._intent("GOLDM", 100)
+        book.apply_fill(intent, self._order(100, 153_327.0))
+        book.mark(intent.instrument.key, 154_327.0)      # +1,000 points
+        assert book.unrealised == pytest.approx(1_000 * 100 * 0.1)   # Rs 10,000
+
+    def test_silver_marks_one_for_one(self):
+        from orbot.execution.positions import PositionBook
+        book = PositionBook()
+        intent = self._intent("SILVER100", 200)
+        book.apply_fill(intent, self._order(200, 2_378.0))
+        book.mark(intent.instrument.key, 2_388.0)        # +10 points
+        assert book.unrealised == pytest.approx(10 * 200)            # Rs 2,000
