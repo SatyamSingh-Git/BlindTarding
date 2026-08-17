@@ -298,14 +298,22 @@ class TradingEngine:
                     f"{signal.bar_ts:%d %b %H:%M} @ {signal_price:,.2f} — "
                     f"price is {price:,.2f}, already past its {sl:,.0f}-point stop")
                 continue
-            log.warning("engine.adopting", plan=state.name,
+            log.warning("engine.adopting", plan=state.name, at_signal=at_signal,
                         bar=signal.bar_ts.isoformat(),
                         signal_price=signal_price, fill_price=price, drift=drift)
-            self.notifier.send(
-                f"{state.name}: adopting the open {signal.action} signalled "
-                f"{signal.bar_ts:%d %b %H:%M} @ {signal_price:,.2f}\n"
-                f"entering at {price:,.2f} ({drift:+,.2f} vs the signal) — "
-                f"this is not the entry the backtest measured")
+            if at_signal:
+                self.notifier.send(
+                    f"{state.name}: adopting the open {signal.action} signalled "
+                    f"{signal.bar_ts:%d %b %H:%M} @ {signal_price:,.2f}\n"
+                    f"filling at the signal price, not the market's "
+                    f"{price:,.2f} ({drift:+,.2f} away) — paper only, so this "
+                    f"run stays comparable to the backtest")
+            else:
+                self.notifier.send(
+                    f"{state.name}: adopting the open {signal.action} signalled "
+                    f"{signal.bar_ts:%d %b %H:%M} @ {signal_price:,.2f}\n"
+                    f"entering at {price:,.2f} ({drift:+,.2f} vs the signal) — "
+                    f"this is not the entry the backtest measured")
             if sl is not None and drift > 0:
                 log.warning("engine.adopt_risk", plan=state.name,
                             planned_stop_points=sl,
