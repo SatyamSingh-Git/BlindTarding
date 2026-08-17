@@ -115,10 +115,11 @@ class MarketCalendar:
         start, _ = self.session_window(when.date())
         return NSE_PREOPEN_START <= when.time() < start
 
-    def minutes_to_close(self, when: dt.datetime | None = None) -> float:
+    def minutes_to_close(self, when: dt.datetime | None = None,
+                         segment: object | None = None) -> float:
         """Negative once the session has ended. Used by the square-off logic."""
         when = self._localise(when)
-        _, end = self.session_window(when.date())
+        _, end = self.session_window(when.date(), segment)
         close_at = dt.datetime.combine(when.date(), end, tzinfo=self.tz)
         return (close_at - when).total_seconds() / 60
 
@@ -142,7 +143,7 @@ class MarketCalendar:
             return f"before open, session {start:%H:%M}-{end:%H:%M}"
         if when.time() >= end:
             return f"after close (session ended {end:%H:%M})"
-        return f"open, {self.minutes_to_close(when):.0f} min to close"
+        return f"open, {self.minutes_to_close(when, segment):.0f} min to close"
 
     def _localise(self, when: dt.datetime | None) -> dt.datetime:
         if when is None:

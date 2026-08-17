@@ -965,8 +965,13 @@ def run(
             journal.close()
             raise typer.Exit(0)
 
+    # Describe the exchange the enabled plans actually trade, not NSE by
+    # default -- a banner reading "after close" while an MCX plan is happily
+    # trading its evening session is worse than no banner.
+    segments = {s.instrument.segment for s in engine.states.values()}
+    segment = segments.pop() if len(segments) == 1 else None
     console.print(f"[bold]{settings.trade_mode.upper()}[/bold] mode — "
-                  f"{engine.calendar.describe()}")
+                  f"{engine.calendar.describe(segment=segment)}")
     console.print("Ctrl-C to stop. Arm the kill switch any time with "
                   "[bold]orbot halt[/bold].")
     try:
