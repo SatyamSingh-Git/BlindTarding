@@ -199,9 +199,20 @@ class GuardChain:
         a bar that closed twenty minutes ago is history, not an instruction."""
         if ctx.signal is None:
             return GuardResult.ok()
+        if ctx.signal.source == "adopted":
+            # An adopted signal is deliberately historical: it is the trade the
+            # strategy is already in, from a bar that closed hours or days ago.
+            # Staleness is the reason it is being adopted, not a fault. Every
+            # other guard still applies -- notably the duplicate check, which
+            # is what stops a restart re-entering the same trade.
+            return GuardResult.ok()
         bar_ts = ctx.signal.bar_ts
         if bar_ts.tzinfo is None:
             bar_ts = bar_ts.replace(tzinfo=IST_TZ)
+        # Localise `now` the same way. Mixing one aware and one naive datetime
+        # raises TypeError, and a guard that raises does not block — it takes
+        # the whole signal path down with it, silently, inside a task.
+        now = ctx.now if ctx.now.tzinfo else ctx.now.replace(tzinfo=IST_TZ)
         # Age from when the bar CLOSED, not when it opened. A bar carries its
         # open time, so measuring from that makes every signal look exactly one
         # timeframe stale the instant it fires — harmless at 5 minutes, but it
@@ -210,7 +221,7 @@ class GuardChain:
         span = 0.0
         if ctx.plan is not None and ctx.plan.signal.tf.is_intraday:
             span = (ctx.plan.signal.tf.minutes or 0) * 60
-        raw_age = (ctx.now - bar_ts).total_seconds()
+        raw_age = (now - bar_ts).total_seconds()
         age = raw_age - span
         if age > self.risk.signal_staleness_seconds:
             return GuardResult(False, "signal_staleness",

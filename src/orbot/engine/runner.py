@@ -228,6 +228,24 @@ class TradingEngine:
                         state.position_key = position.key
 
     # --- feed ------------------------------------------------------------
+    async def _await_first_tick(self, timeout: float = 20.0) -> bool:
+        """Wait for the feed to prove itself before trading on it.
+
+        Returns False on timeout rather than raising: a quiet feed is a reason
+        to skip adoption, not to abort startup, and the guards will keep
+        refusing entries until ticks arrive.
+        """
+        if self.feed is None:
+            return False
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            if self.feed.seconds_since_last_tick() is not None:
+                return True
+            await asyncio.sleep(0.25)
+        log.warning("engine.no_first_tick", seconds=timeout,
+                    detail="feed delivered nothing; skipping adoption")
+        return False
+
     async def adopt_open_signals(self) -> None:
         """Join a trade the strategy is already in, for plans that opt in.
 
@@ -660,12 +678,18 @@ class TradingEngine:
 
         await self.warmup()
         await self.adopt_broker_positions()
-        await self.adopt_open_signals()
 
         if self.make_feed is not None:
             self.feed = self.make_feed(self.on_tick)
             self.feed.add(self._subscriptions())
             self._tasks.append(asyncio.create_task(self.feed.run()))
+
+        # Adoption has to come after the feed, not before it. It is an entry
+        # like any other and so must clear the feed-freshness guard, which by
+        # design refuses to trade until a tick has actually arrived — run
+        # first, it blocked itself every single time.
+        await self._await_first_tick()
+        await self.adopt_open_signals()
 
         for loop in (self._bar_clock, self._reconcile_loop,
                      self._square_off_loop, self._heartbeat_loop):

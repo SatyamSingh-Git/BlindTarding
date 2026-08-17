@@ -208,3 +208,159 @@ class TestExpiringContracts:
     def test_an_exit_is_never_blocked_by_expiry(self, chain):
         """Whatever else is true, you must always be able to close."""
         assert chain._contract_alive(self._ctx(-5, action="SELL")).allowed
+
+
+class TestBracketExits:
+    """The bracket is what stands between a losing trade and an unbounded one.
+    It fires from tick data, between bar closes, on a latch."""
+
+    @staticmethod
+    def _state(sl=50.0, tp=250.0, entry=2_378.0, qty=200, long=True):
+        from unittest.mock import MagicMock
+        from orbot.config import PlanRisk, SignalConfig, TradePlan
+        from orbot.engine.runner import PlanState
+        from orbot.models import Position
+
+        plan = TradePlan(
+            name="p",
+            signal=SignalConfig(exchange_segment=ExchangeSegment.MCX_COMM,
+                                security_id="574823",
+                                instrument_type=InstrumentType.FUTCOM,
+                                timeframe="2h"),
+            risk=PlanRisk(sl_points=sl, target_points=tp, square_off_time=None))
+        state = PlanState(plan=plan, instrument=SILVER, timeframe=None,
+                          series=None, strategy=None, resolver=None)
+        state.position_key = SILVER.key
+        position = Position(security_id=SILVER.security_id,
+                            segment=SILVER.segment,
+                            net_qty=qty if long else -qty, avg_price=entry)
+        engine = MagicMock()
+        engine.book.get.return_value = position
+        engine._tasks = []
+        return engine, state
+
+    @staticmethod
+    def _check(engine, state, price):
+        """Run the bracket check without a live event loop.
+
+        _check_bracket schedules the exit with asyncio.create_task, which needs
+        a running loop; here the only question is whether it decided to fire.
+        """
+        import asyncio
+        from unittest.mock import patch
+        from orbot.engine.runner import TradingEngine
+
+        fired = []
+        with patch.object(asyncio, "create_task",
+                          side_effect=lambda coro: (coro.close(),
+                                                    fired.append(1))[1]):
+            TradingEngine._check_bracket(engine, state, price)
+        return bool(fired)
+
+    def test_stop_fires_when_price_touches_it_exactly(self):
+        engine, state = self._state()
+        assert self._check(engine, state, 2_378.0 - 50.0)
+
+    def test_stop_does_not_fire_one_tick_above(self):
+        engine, state = self._state()
+        assert not self._check(engine, state, 2_378.0 - 49.0)
+
+    def test_target_fires_on_exact_touch(self):
+        engine, state = self._state()
+        assert self._check(engine, state, 2_378.0 + 250.0)
+
+    def test_a_gap_straight_through_the_stop_still_fires(self):
+        engine, state = self._state()
+        assert self._check(engine, state, 2_000.0)
+
+    def test_a_short_position_stops_out_upwards(self):
+        """Sign errors here are silent and expensive: a short stopping out on a
+        fall would ride the loss instead of cutting it."""
+        engine, state = self._state(long=False)
+        assert self._check(engine, state, 2_378.0 + 50.0)
+        engine, state = self._state(long=False)
+        assert not self._check(engine, state, 2_378.0 - 50.0)
+
+    def test_the_latch_stops_a_second_flatten(self):
+        """Ticks keep arriving while the exit order is in flight. Two flattens
+        would try to sell what has already been sold."""
+        engine, state = self._state()
+        self._check(engine, state, 2_000.0)
+        before = len(engine._tasks)
+        self._check(engine, state, 1_900.0)
+        assert len(engine._tasks) == before
+
+    def test_no_bracket_configured_never_fires(self):
+        engine, state = self._state(sl=None, tp=None)
+        assert not self._check(engine, state, 1.0)
+
+    def test_bracket_measures_from_the_adopted_signal_price(self):
+        """An adopted trade keeps the stop the strategy was tested with, not
+        one recomputed from a fill that has already drifted."""
+        engine, state = self._state(entry=2_400.0)
+        state.bracket_ref_price = 2_377.0        # the signal, not the fill
+        assert not self._check(engine, state, 2_330.0)   # 2,377-50 = 2,327
+        engine, state = self._state(entry=2_400.0)
+        state.bracket_ref_price = 2_377.0
+        assert self._check(engine, state, 2_327.0)
+
+
+class TestAdoptedSignalsAreDeliberatelyOld:
+    """Adoption acts on a bar that closed hours or days ago. The staleness
+    guard must not treat that as a fault, and every other guard must still
+    apply -- especially the duplicate check."""
+
+    def test_staleness_does_not_block_an_adopted_signal(self, chain):
+        from orbot.execution.guards import GuardContext
+        old = dt.datetime.now() - dt.timedelta(days=3)
+        sig = Signal(plan="p", action="BUY", bar_ts=old, price=1.0,
+                     source="adopted")
+        assert chain._signal_fresh(GuardContext(now=dt.datetime.now(),
+                                                signal=sig)).allowed
+
+    def test_a_normal_signal_that_old_is_still_blocked(self, chain):
+        from orbot.execution.guards import GuardContext
+        old = dt.datetime.now() - dt.timedelta(days=3)
+        sig = Signal(plan="p", action="BUY", bar_ts=old, price=1.0,
+                     source="engine")
+        assert not chain._signal_fresh(GuardContext(now=dt.datetime.now(),
+                                                    signal=sig)).allowed
+
+
+class TestGuardsNeverRaise:
+    """A guard that raises does not block -- it takes the signal path down with
+    it, inside a task, where the exception is never seen."""
+
+    @pytest.mark.parametrize("now_aware,bar_aware", [
+        (True, False), (False, True), (False, False), (True, True)])
+    def test_staleness_survives_any_mix_of_naive_and_aware(
+            self, chain, now_aware, bar_aware):
+        from zoneinfo import ZoneInfo
+        from orbot.execution.guards import GuardContext
+        IST = ZoneInfo("Asia/Kolkata")
+        now = dt.datetime.now(IST) if now_aware else dt.datetime.now()
+        bar = now - dt.timedelta(minutes=1)
+        if not bar_aware and bar.tzinfo:
+            bar = bar.replace(tzinfo=None)
+        if bar_aware and not bar.tzinfo:
+            bar = bar.replace(tzinfo=IST)
+        sig = Signal(plan="p", action="BUY", bar_ts=bar, price=1.0)
+        chain._signal_fresh(GuardContext(now=now, signal=sig))   # must not raise
+
+    def test_every_signal_guard_survives_an_empty_context(self, chain):
+        """Fail closed, never explode, on a context with nothing filled in."""
+        from orbot.execution.guards import GuardContext
+        ctx = GuardContext(now=dt.datetime.now())
+        for guard in (chain._kill_switch, chain._market_open, chain._feed_fresh,
+                      chain._signal_fresh, chain._not_duplicate,
+                      chain._square_off_window, chain._contract_alive,
+                      chain._daily_loss, chain._reconciled, chain._trades_today,
+                      chain._open_positions):
+            guard(ctx)          # must not raise
+
+    def test_every_order_guard_survives_an_empty_context(self, chain):
+        from orbot.execution.guards import GuardContext
+        ctx = GuardContext(now=dt.datetime.now())
+        for guard in (chain._fat_finger, chain._sufficient_funds,
+                      chain._slippage):
+            guard(ctx)
