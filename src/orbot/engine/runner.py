@@ -243,7 +243,7 @@ class TradingEngine:
                             signal_price=signal_price, price=price,
                             detail="price is already past the stop for this signal")
                 self.notifier.send(
-                    f"{state.name}: not adopting the open {signal.action.value} from "
+                    f"{state.name}: not adopting the open {signal.action} from "
                     f"{signal.bar_ts:%d %b %H:%M} @ {signal_price:,.2f} — "
                     f"price is {price:,.2f}, already past its {sl:,.0f}-point stop")
                 continue
@@ -251,10 +251,16 @@ class TradingEngine:
                         bar=signal.bar_ts.isoformat(),
                         signal_price=signal_price, fill_price=price, drift=drift)
             self.notifier.send(
-                f"{state.name}: adopting the open {signal.action.value} signalled "
+                f"{state.name}: adopting the open {signal.action} signalled "
                 f"{signal.bar_ts:%d %b %H:%M} @ {signal_price:,.2f}\n"
                 f"entering at {price:,.2f} ({drift:+,.2f} vs the signal) — "
                 f"this is not the entry the backtest measured")
+            if sl is not None and drift > 0:
+                log.warning("engine.adopt_risk", plan=state.name,
+                            planned_stop_points=sl,
+                            actual_risk_points=sl + drift,
+                            detail="stop stays at the signal's level, so the "
+                                   "risk from this fill is larger than planned")
             ctx = await self._context(state, signal)
             await self._enter(state, signal, ctx)
             # Measure the bracket from the signal, not from today's fill, so the
