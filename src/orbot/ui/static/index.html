@@ -295,7 +295,7 @@
       <div class="caveat" id="perfCaveat"></div>
       <div class="kpis" id="perfKpis"></div>
       <canvas id="equity" style="height:150px"></canvas>
-      <div class="scroll" style="max-height:200px"><table id="trades"></table></div>
+      <div class="scroll" style="max-height:200px"><table id="tradeList"></table></div>
     </div>
 
     <div class="panel" style="margin-top:13px">
@@ -695,7 +695,7 @@ function renderPerf(){
     $("#perfKpis").innerHTML =
       `<div class="kpi"><b class="muted">—</b><span>${mode==='options'
         ? 'click Model option leg' : 'no closed trades'}</span></div>`;
-    $("#trades").innerHTML = ""; drawEquity([]); return;
+    $("#tradeList").innerHTML = ""; drawEquity([]); return;
   }
   const unit = mode === "points" ? "" : "₹";
   const sign = v => (v>=0?"+":"") + unit + fmt(v, mode==="points"?1:0);
@@ -716,7 +716,7 @@ function renderPerf(){
   drawEquity(d.curve || []);
 
   const rows = (perf.trades||[]).slice().reverse();
-  table($("#trades"), ["entry","exit","pts","contract","₹"], rows, t=>`<tr>
+  table($("#tradeList"), ["entry","exit","pts","contract","₹"], rows, t=>`<tr>
     <td class="mono">${dmy(t.entry_ts)} ${hhmm(t.entry_ts)}
       <span class="pill ${t.side==='long'?'':'sell'}">${t.side==='long'?'L':'S'}</span></td>
     <td class="mono muted">${t.exit_ts?hhmm(t.exit_ts):"open"}${
