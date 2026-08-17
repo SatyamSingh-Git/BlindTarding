@@ -454,7 +454,13 @@ async function refresh(){
   const pick = $("#planPick");
   if(pick.options.length !== s.plans.length){
     pick.innerHTML = s.plans.map(p=>`<option value="${p.name}">${p.name}</option>`).join("");
-    if(!currentPlan && s.plans.length){ currentPlan = s.plans[0].name;
+    // Open on a plan that is actually running. Defaulting to plans[0] landed
+    // on a disabled plan with no warmed data, so the chart read "no data" and
+    // the whole dashboard looked broken while the engine was trading fine.
+    if(!currentPlan && s.plans.length){
+      const live = s.plans.find(p=>p.enabled) || s.plans[0];
+      currentPlan = live.name;
+      pick.value = currentPlan;
       pgLoad().then(function(){ edLoad(); loadChart(); loadPerf(false); }); }
   }
 }
