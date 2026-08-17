@@ -142,8 +142,6 @@ class TestAdoptionIsNotABackDoor:
     """Adoption opens a position at startup, the least supervised moment the
     bot has. It must clear the same gate as any other entry."""
 
-    @staticmethod
-
     def test_a_tripped_kill_switch_stops_adoption(self, tmp_path):
         """The clearest case: a human halted the bot; a restart must not trade."""
         from orbot.execution.guards import GuardChain, GuardContext
@@ -177,3 +175,36 @@ class TestAdoptionIsNotABackDoor:
         with pytest.raises(DuplicateSignal):
             journal.record_signal(sig)     # second run, same bar
         journal.close()
+
+
+class TestExpiringContracts:
+    """A plan can pin one contract by security id, which never rolls. After
+    expiry that id is dead -- no ticks, no fills -- and the plan goes quiet
+    with no error anywhere."""
+
+    @staticmethod
+    def _ctx(days_out, action="BUY"):
+        from orbot.config import SignalConfig, TradePlan
+        from orbot.execution.guards import GuardContext
+        plan = TradePlan(name="p", signal=SignalConfig(
+            exchange_segment=ExchangeSegment.MCX_COMM, security_id="1",
+            instrument_type=InstrumentType.FUTCOM, timeframe="2h"))
+        now = dt.datetime(2026, 8, 17, 12, 0)
+        sig = Signal(plan="p", action=action, bar_ts=now, price=1.0)
+        return GuardContext(now=now, plan=plan, signal=sig,
+                            contract_expiry=now.date() + dt.timedelta(days=days_out))
+
+    def test_an_expired_contract_cannot_be_entered(self, chain):
+        got = chain._contract_alive(self._ctx(-1))
+        assert not got.allowed and got.guard == "contract_expired"
+
+    def test_entries_stop_before_the_last_sessions(self, chain):
+        got = chain._contract_alive(self._ctx(1))
+        assert not got.allowed and got.guard == "contract_expiring"
+
+    def test_a_healthy_contract_passes(self, chain):
+        assert chain._contract_alive(self._ctx(14)).allowed
+
+    def test_an_exit_is_never_blocked_by_expiry(self, chain):
+        """Whatever else is true, you must always be able to close."""
+        assert chain._contract_alive(self._ctx(-5, action="SELL")).allowed

@@ -221,6 +221,10 @@ class GlobalRisk(BaseModel):
     # governs the real order. Deliberately generous, because blocking an
     # affordable trade is cheaper than sending an unaffordable one.
     assumed_margin_pct: float = 0.20
+    # Stop opening new positions this many days before a contract expires.
+    # Liquidity thins and margins rise into the last sessions, and a plan that
+    # pins one contract by id has no rollover of its own.
+    min_days_to_expiry: int = 2
     max_open_positions: int = 3
     max_notional_per_order: float = 200_000.0
     max_qty_per_order: int = 10_000

@@ -154,8 +154,22 @@ class TradingEngine:
         problems: list[str] = []
         if not self.states:
             problems.append("no enabled plans — nothing to run")
+        today = dt.datetime.now(IST_TZ).date()
         for state in self.states.values():
             problems.extend(state.resolver.validate())
+            expiry = state.instrument.expiry
+            if expiry is not None and expiry < today:
+                problems.append(
+                    f"plan {state.name!r} trades {state.instrument.display_name}, "
+                    f"which expired on {expiry:%d %b %Y}. Re-resolve it with "
+                    "`orbot resolve` — a dead security id returns no data and "
+                    "places no orders, so the plan would simply go quiet."
+                )
+            elif expiry is not None and (expiry - today).days <= 3:
+                log.warning("engine.expiry_near", plan=state.name,
+                            instrument=state.instrument.display_name,
+                            expiry=expiry.isoformat(),
+                            days=(expiry - today).days)
             if (not state.timeframe.is_native
                     and not state.plan.strategy.resampling_validated):
                 problems.append(
@@ -521,6 +535,7 @@ class TradingEngine:
             available_funds=funds,
             last_tick_age=age,
             trades_today=state.trades_today if state else 0,
+            contract_expiry=state.instrument.expiry if state else None,
         )
 
     async def _maybe_halt(self, verdict: GuardResult) -> None:

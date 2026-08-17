@@ -78,6 +78,7 @@ class GuardContext:
     reconcile_detail: str = ""
     trades_today: int = 0
     reference_price: float | None = None    # for the slippage check
+    contract_expiry: dt.date | None = None  # of the instrument being traded
 
     @property
     def total_pnl(self) -> float:
@@ -123,6 +124,7 @@ class GuardChain:
             self._signal_fresh,         # 14
             self._not_duplicate,        # 5
             self._square_off_window,    # 12
+            self._contract_alive,       # 15
             self._daily_loss,           # 2
             self._reconciled,           # 11
             self._trades_today,         # 3
@@ -245,6 +247,34 @@ class GuardChain:
         if ctx.now.time() >= cutoff:
             return GuardResult(False, "square_off_window",
                                f"past the {cutoff:%H:%M} square-off cutoff")
+        return GuardResult.ok()
+
+    def _contract_alive(self, ctx: GuardContext) -> GuardResult:
+        """15. Refuse to open a position in a contract that is expiring.
+
+        A plan can pin one contract by security id, which never rolls. Past
+        expiry that id is dead: no ticks, no fills, and the plan simply goes
+        quiet. The days before expiry are their own hazard — liquidity drains
+        and the exchange raises margins — so entries stop before the last day,
+        while exits stay allowed so an open position can always be closed.
+        """
+        if ctx.plan is None or ctx.signal is None:
+            return GuardResult.ok()
+        if ctx.signal.action != "BUY":
+            return GuardResult.ok()          # never block a close
+        expiry = getattr(ctx, "contract_expiry", None)
+        if expiry is None:
+            return GuardResult.ok()
+        days = (expiry - ctx.now.date()).days
+        if days < 0:
+            return GuardResult(False, "contract_expired",
+                               f"contract expired on {expiry:%d %b %Y} — roll the "
+                               "plan to the next one")
+        if days <= self.risk.min_days_to_expiry:
+            return GuardResult(False, "contract_expiring",
+                               f"contract expires {expiry:%d %b %Y}, {days} day(s) "
+                               f"away — no new entries inside "
+                               f"{self.risk.min_days_to_expiry} days")
         return GuardResult.ok()
 
     def _daily_loss(self, ctx: GuardContext) -> GuardResult:
