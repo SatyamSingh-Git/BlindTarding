@@ -94,6 +94,12 @@ class Settings(BaseSettings):
         return DATA_DIR / "angel_scrip_master.json"
 
     @property
+    def paper_state_path(self) -> Path:
+        """Where simulated positions survive a restart. A live broker remembers
+        them for you; the simulator has to write them down."""
+        return DATA_DIR / ".paper_positions.json"
+
+    @property
     def angel_session_path(self) -> Path:
         return DATA_DIR / ".angel_session.json"
 

@@ -36,7 +36,10 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from ..broker.dhan_client import DhanAPIError, DhanClient, OrderStateUnknown
-from ..constants import (IST, OPTION_TYPES, InstrumentType, OrderStatus,
+from pathlib import Path
+import json
+
+from ..constants import (IST, ExchangeSegment, OPTION_TYPES, InstrumentType, OrderStatus,
                          OrderType, TransactionType)
 from ..models import Order, OrderIntent, Position
 
@@ -109,7 +112,8 @@ class PaperOMS(OMS):
 
     def __init__(self, *, starting_funds: float = 1_000_000.0,
                  slippage_pct: float = 0.05,
-                 margin_pct: float = 0.11) -> None:
+                 margin_pct: float = 0.11,
+                 state_path: Path | None = None) -> None:
         self.funds = starting_funds
         self.starting_funds = starting_funds
         self.slippage_pct = slippage_pct
@@ -123,6 +127,12 @@ class PaperOMS(OMS):
         self._marks: dict[tuple[str, str], float] = {}
         self._kinds: dict[tuple[str, str], InstrumentType] = {}
         self._multipliers: dict[tuple[str, str], float] = {}
+        # A live broker remembers your positions across a restart; an in-memory
+        # simulator does not, and the duplicate-signal guard then correctly
+        # refuses to re-enter -- leaving the bot flat and blind to a trade it
+        # believes it is in. Persisting them keeps paper honest about restarts.
+        self._state_path = state_path
+        self._restore()
 
     def place(self, intent: OrderIntent, *, reference_price: float | None = None) -> Order:
         price = reference_price or intent.price
@@ -157,6 +167,7 @@ class PaperOMS(OMS):
         self._kinds[intent.instrument.key] = intent.instrument.instrument_type
         self._multipliers[intent.instrument.key] = intent.instrument.price_multiplier
         self._recompute_funds()
+        self._persist()
         log.info("oms.paper_fill", instrument=intent.instrument.display_name,
                  side=intent.transaction_type.value, qty=intent.quantity,
                  price=round(fill, 2), funds=round(self.funds, 2),
@@ -235,6 +246,52 @@ class PaperOMS(OMS):
     def available_funds(self) -> float | None:
         return self.funds
 
+    # --- persistence -----------------------------------------------------
+    def _restore(self) -> None:
+        if self._state_path is None or not self._state_path.exists():
+            return
+        try:
+            raw = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.warning("oms.paper_state_unreadable", error=str(exc))
+            return
+        if not isinstance(raw, dict):
+            return
+        for row in raw.get("positions", []):
+            try:
+                key = (row["segment"], row["security_id"])
+                self._positions[key] = Position(
+                    security_id=row["security_id"],
+                    segment=ExchangeSegment(row["segment"]),
+                    net_qty=int(row["net_qty"]),
+                    avg_price=float(row["avg_price"]),
+                    realised=float(row.get("realised", 0.0)))
+                self._marks[key] = float(row.get("mark", row["avg_price"]))
+                self._kinds[key] = InstrumentType(row["kind"])
+                self._multipliers[key] = float(row.get("multiplier", 1.0))
+            except (KeyError, TypeError, ValueError) as exc:
+                log.warning("oms.paper_state_row_skipped", error=str(exc))
+        self._recompute_funds()
+        if self._positions:
+            log.info("oms.paper_state_restored", positions=len(self._positions),
+                     funds=round(self.funds, 2))
+
+    def _persist(self) -> None:
+        if self._state_path is None:
+            return
+        payload = {"positions": [
+            {"security_id": p.security_id, "segment": p.segment.value,
+             "net_qty": p.net_qty, "avg_price": p.avg_price,
+             "realised": p.realised, "mark": self._marks.get(k, p.avg_price),
+             "kind": (self._kinds.get(k) or InstrumentType.EQUITY).value,
+             "multiplier": self._multipliers.get(k, 1.0)}
+            for k, p in self._positions.items() if p.net_qty != 0]}
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._state_path.write_text(json.dumps(payload), encoding="utf-8")
+        except OSError as exc:
+            log.warning("oms.paper_state_unwritable", error=str(exc))
+
 
 class LiveOMS(OMS):
     """Real orders against Dhan, routed through the static-IP proxy."""
@@ -293,12 +350,14 @@ class LiveOMS(OMS):
 
 def build_oms(mode: str, client: DhanClient | None, *,
               starting_funds: float = 1_000_000.0,
-              slippage_pct: float = 0.05) -> OMS:
+              slippage_pct: float = 0.05,
+              state_path: Path | None = None) -> OMS:
     if mode == "live":
         if client is None:
             raise ValueError("live mode requires a Dhan client")
         return LiveOMS(client)
-    return PaperOMS(starting_funds=starting_funds, slippage_pct=slippage_pct)
+    return PaperOMS(starting_funds=starting_funds, slippage_pct=slippage_pct,
+                    state_path=state_path)
 
 
 __all__ = ["OMS", "PaperOMS", "LiveOMS", "build_oms"]

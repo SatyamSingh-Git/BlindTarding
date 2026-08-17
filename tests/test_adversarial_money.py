@@ -364,3 +364,51 @@ class TestGuardsNeverRaise:
         for guard in (chain._fat_finger, chain._sufficient_funds,
                       chain._slippage):
             guard(ctx)
+
+
+class TestPaperPositionsSurviveRestart:
+    """A live broker remembers your positions across a restart; the simulator
+    has to write them down. Without that the bot comes back flat, the
+    duplicate guard correctly refuses to re-enter, and it sits blind to a
+    trade it believes it is in."""
+
+    def test_positions_and_funds_come_back(self, tmp_path):
+        from orbot.execution.oms import PaperOMS
+        path = tmp_path / "paper.json"
+
+        one = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0,
+                       state_path=path)
+        one.place(intent(GOLDM, 100), reference_price=153_327.0)
+        funds, positions = one.available_funds(), one.positions()
+
+        two = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0,
+                       state_path=path)
+        assert [(p.security_id, p.net_qty, p.avg_price) for p in two.positions()] \
+            == [(p.security_id, p.net_qty, p.avg_price) for p in positions]
+        assert two.available_funds() == pytest.approx(funds)
+
+    def test_a_flat_book_restores_as_flat(self, tmp_path):
+        from orbot.constants import TransactionType
+        from orbot.execution.oms import PaperOMS
+        path = tmp_path / "paper.json"
+        one = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0, state_path=path)
+        one.place(intent(GOLDM, 100), reference_price=150_000.0)
+        one.place(intent(GOLDM, 100, TransactionType.SELL),
+                  reference_price=150_500.0)
+        two = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0, state_path=path)
+        assert two.positions() == []
+
+    def test_corrupt_state_is_ignored_not_fatal(self, tmp_path):
+        from orbot.execution.oms import PaperOMS
+        path = tmp_path / "paper.json"
+        path.write_text("{not json at all", encoding="utf-8")
+        oms = PaperOMS(starting_funds=300_000.0, state_path=path)
+        assert oms.positions() == []
+        assert oms.available_funds() == pytest.approx(300_000.0)
+
+    def test_state_of_the_wrong_shape_is_ignored(self, tmp_path):
+        from orbot.execution.oms import PaperOMS
+        path = tmp_path / "paper.json"
+        path.write_text('["a list, not an object"]', encoding="utf-8")
+        oms = PaperOMS(starting_funds=300_000.0, state_path=path)
+        assert oms.positions() == []

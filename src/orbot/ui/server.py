@@ -606,7 +606,8 @@ def create_app(*, allow_control: bool = True):
         journal = Journal(settings.journal_path)
         try:
             bundle = build_broker(settings, refresh_instruments=False)
-            oms = build_oms(settings.trade_mode, bundle.client)
+            oms = build_oms(settings.trade_mode, bundle.client,
+                            state_path=settings.paper_state_path)
             positions = oms.positions()
             if not positions:
                 return {"closed": 0, "detail": "nothing open"}
