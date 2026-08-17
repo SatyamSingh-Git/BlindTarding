@@ -599,3 +599,46 @@ class TestContractMultipliersAreDerived:
 
     def test_a_zero_lot_size_does_not_divide_by_zero(self):
         assert self._inst("GOLDM", 0).price_multiplier == 1.0
+
+
+class TestExitsMissedWhileStopped:
+    """Stopping overnight is fine for entries -- adoption catches those. An
+    exit missed while stopped is worse: the position stays open, running risk
+    the strategy has already decided against."""
+
+    @staticmethod
+    def _strategy_state(buy_at, sell_at, n=140):
+        import datetime as dt
+        from unittest.mock import patch
+        from orbot.engine.strategy import SvmkrUtHmaOrb, params_from_config
+        t0 = dt.datetime(2026, 8, 14, 9, 0)
+        stub = type("R", (), {
+            "timestamps": [t0 + dt.timedelta(hours=2 * i) for i in range(n)],
+            "closes": [100.0 + i for i in range(n)],
+            "buy": [i in buy_at for i in range(n)],
+            "sell": [i in sell_at for i in range(n)],
+            "ut": type("U", (), {"stop": [0.0] * n, "atr": [1.0] * n})(),
+            "__len__": lambda self: n,
+        })()
+        strat = SvmkrUtHmaOrb(params_from_config({"ut_key": 3.0,
+                                                  "ut_atr_period": 1}))
+        return strat, patch.object(SvmkrUtHmaOrb, "evaluate", return_value=stub)
+
+    def test_strategy_still_long_means_keep_holding(self):
+        from orbot.models import Candle
+        import datetime as dt
+        strat, patched = self._strategy_state(buy_at={120}, sell_at=set())
+        bars = [Candle(ts=dt.datetime(2026, 8, 14, 9, 0), open=1, high=1,
+                       low=1, close=1)] * 140
+        with patched:
+            assert strat.open_position_entry(bars) is not None
+
+    def test_strategy_flat_means_the_position_is_stale(self):
+        """A SELL after the BUY: whatever we still hold should not be held."""
+        from orbot.models import Candle
+        import datetime as dt
+        strat, patched = self._strategy_state(buy_at={120}, sell_at={131})
+        bars = [Candle(ts=dt.datetime(2026, 8, 14, 9, 0), open=1, high=1,
+                       low=1, close=1)] * 140
+        with patched:
+            assert strat.open_position_entry(bars) is None

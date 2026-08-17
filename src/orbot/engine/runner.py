@@ -276,6 +276,25 @@ class TradingEngine:
         the strategy's own rules that trade is dead, and adopting it would open
         a position that its own bracket should close immediately.
         """
+        # Symmetry first: if the strategy has exited while we were not
+        # running, close what we are still holding. Missing an exit is worse
+        # than missing an entry -- an entry not taken costs an opportunity, a
+        # position held past its exit keeps running risk the strategy has
+        # already decided against, with no stop between it and the next signal.
+        for state in self.states.values():
+            if state.is_flat:
+                continue
+            bars = list(state.series.bars)
+            if state.strategy.open_position_entry(bars) is not None:
+                continue          # strategy is still long; holding is correct
+            log.warning("engine.stale_position", plan=state.name,
+                        detail="strategy is flat but a position is open — the "
+                               "exit fired while the engine was not running")
+            self.notifier.send(
+                f"{state.name}: the strategy exited while the bot was stopped, "
+                f"but the position is still open. Closing it now.")
+            await self.flatten(f"{state.name}: exit missed while stopped")
+
         for state in self.states.values():
             if not (state.plan.strategy.adopt_open_signal and state.is_flat):
                 continue

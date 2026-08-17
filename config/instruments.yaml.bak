@@ -1,0 +1,212 @@
+# Trade plans.
+#
+# The signal instrument and the execution instrument are deliberately separate.
+# The indicator runs on `signal`; `execution` decides what actually gets bought.
+# That split is what lets one engine trade index options, futures and cash.
+#
+# STRATEGY PARAMS BELOW ARE THE REAL ONES, read off the live chart legend
+# ("SVMKR_UT_HMA_ORB  3  1  31  5  1010-1015") and the Inputs dialog — NOT the
+# input() defaults in the Pine source, which differ (the source defaults
+# ut_key to 2, the chart runs 3).
+#
+# SECURITY IDS BELOW ARE ANGEL TOKENS (BROKER=angel). Dhan uses different
+# numbers for the same contracts -- NIFTY is 99926000 on Angel and 13 on Dhan.
+# After switching brokers, re-resolve EVERY id with `orbot resolve`. A stale id
+# does not error; it resolves to a real but unrelated instrument.
+#
+# NOTE: every plan is `enabled: false`. Nothing trades until the port clears the
+# validation gate in PLAN.md section 6.
+
+defaults: &svmkr_params
+  ut_key: 3.0              # chart legend value 1 — source default is 2
+  ut_atr_period: 1         # ATR(1) == raw true range; a very fast stop
+  use_heikin_ashi: false   # checkbox unchecked on the chart
+  hma_length: 31           # plot-only, does not gate signals
+  orb_minutes: 5           # plot-only
+  orb_session: "1010-1015" # 10:10-10:15 IST — NOT the market open
+
+  # Deviations from the indicator. The Pine source does NOT gate buy/sell on
+  # the Hull MA or the opening range, so both default off in order to reproduce
+  # the chart exactly. Turning either on changes the strategy and requires the
+  # validation gate to be re-run.
+  require_hma_agreement: false
+  require_orb_breakout: false
+
+plans:
+  # --- index options: signal on NIFTY spot, buy an ATM call ---------------
+  - name: nifty-atm-ce
+    enabled: false
+    signal:
+      exchange_segment: IDX_I
+      security_id: "99926000"    # NIFTY 50 (Angel token; Dhan uses 13)
+      instrument_type: INDEX
+      timeframe: 5               # confirm against the chart you actually watch
+    strategy:
+      preset: svmkr_ut_hma_orb
+      signal_on_bar_close: true  # intrabar signals repaint — see PLAN.md section 5
+      params: *svmkr_params
+    execution:
+      mode: option
+      underlying: NIFTY
+      on_buy:
+        option_type: CE
+        strike: ATM
+        expiry: nearest
+      on_sell: exit             # SELL closes the long and goes flat
+      product: INTRADAY
+      order_type: MARKET
+      qty_lots: 1
+    risk:
+      sl_pct: 25
+      target_pct: 50
+      max_trades_per_day: 4
+      square_off_time: "15:10"
+
+  # --- futures: signal and execution are the same contract ---------------
+  - name: banknifty-fut
+    enabled: false
+    signal:
+      exchange_segment: IDX_I
+      security_id: "99926009"    # BANKNIFTY (Angel token; Dhan uses 25)
+      instrument_type: INDEX
+      timeframe: 5
+    strategy:
+      preset: svmkr_ut_hma_orb
+      params: *svmkr_params
+    execution:
+      mode: future
+      underlying: BANKNIFTY
+      on_buy:
+        expiry: nearest_monthly
+      on_sell: exit
+      product: INTRADAY
+      order_type: MARKET
+      qty_lots: 1
+    risk:
+      max_trades_per_day: 3
+      square_off_time: "15:10"
+
+  # --- cash equity: simplest possible mapping ----------------------------
+  - name: reliance-cash
+    enabled: false
+    signal:
+      exchange_segment: NSE_EQ
+      security_id: "2885"        # RELIANCE — same id on Angel and Dhan by
+                                 # coincidence. Do not assume that holds for
+                                 # other symbols; re-resolve after any switch.
+      instrument_type: EQUITY
+      timeframe: 15
+    strategy:
+      preset: svmkr_ut_hma_orb
+      params: *svmkr_params
+    execution:
+      mode: same
+      on_sell: exit
+      product: INTRADAY
+      order_type: MARKET
+      quantity: 10
+    risk:
+      sl_pct: 1.5
+      max_trades_per_day: 2
+      square_off_time: "15:15"
+
+  # --- MCX GOLD MINI futures, 2-hour ---------------------------------------
+  # Signal and execution are the same contract: no option leg, no strike
+  # selection, just the future the indicator is computed on.
+  #
+  # square_off_time is null on purpose. This plan holds for days -- the 400-day
+  # test's best trade ran 6 Aug to 13 Aug. Flattening every afternoon would be
+  # a different strategy than the one that was validated.
+  #
+  # Stop is 2,000 points (Rs 20,000 on one 100-qty lot). Chosen from the
+  # maximum-adverse-excursion distribution, not the P&L sweep: no winning trade
+  # in 400 days dipped more than 2,178 points, while losers reached 7,532.
+  # No target -- on gold a target added nothing; profit was flat above a
+  # 1,800-point stop and only the drawdown improved.
+  - name: goldm-2h
+    enabled: true
+    signal:
+      exchange_segment: MCX_COMM
+      security_id: "563946"      # GOLDM 04SEP2026 FUT (Angel token)
+      instrument_type: FUTCOM
+      timeframe: 2h
+    strategy:
+      preset: svmkr_ut_hma_orb
+      signal_on_bar_close: true
+      # 2h is resampled from Angel's 1h bars, anchored to the MCX 09:00 open.
+      # This is the exact construction the 400-day study ran on, and its bars
+      # were checked against the chart (see docs/FINDINGS-2026-08-15.md).
+      resampling_validated: true
+      # Join a trade the strategy is already in at startup. Without this the
+      # bot sits flat while its own chart shows a live long, until the next
+      # full cycle completes. The fill is at today's price, not the signal's,
+      # so the trade is not the one the backtest measured -- but the bracket
+      # is still measured from the signal price, keeping the risk geometry.
+      adopt_open_signal: true
+      # Paper only. Fill the adopted trade at the price its signal fired at,
+      # so this run measures the strategy rather than the penalty for having
+      # started three days into a trade already in progress.
+      adopt_fill: signal
+      params: *svmkr_params
+    execution:
+      mode: same
+      underlying: GOLDM
+      on_sell: exit
+      product: MARGIN           # carry-forward; INTRADAY would be auto-squared
+      order_type: MARKET
+      quantity: 100             # 1 lot = Rs 10 per point
+    risk:
+      sl_points: 2000
+      max_trades_per_day: 4
+      square_off_time: null
+
+  # --- MCX SILVER100 futures, 2-hour ---------------------------------------
+  # The best configuration found: over 400 days this returned +296% on
+  # Rs 1.5 lakh with a Rs 57,379 worst drawdown (return/drawdown 7.73), and
+  # unlike gold it beat buy-and-hold.
+  #
+  # 50-point stop / 250-point target is the tested 1:5. A 13-point stop was
+  # tried and rejected: 82% of trades dip more than 13 points, so four in five
+  # were ejected before they could work, and 2 ticks of slippage cost 67% of
+  # the profit. At 50 points slippage costs 11%.
+  #
+  # Only 8 of 68 trades ever reached the target -- most exit on the
+  # indicator's own SELL. The target caps the rare monster; it does not define
+  # the trade.
+  - name: silver100-2h
+    enabled: true
+    signal:
+      exchange_segment: MCX_COMM
+      security_id: "574823"      # SILVER100 31AUG2026 FUT (Angel token)
+      instrument_type: FUTCOM
+      timeframe: 2h
+    strategy:
+      preset: svmkr_ut_hma_orb
+      signal_on_bar_close: true
+      # 2h is resampled from Angel's 1h bars, anchored to the MCX 09:00 open.
+      # This is the exact construction the 400-day study ran on, and its bars
+      # were checked against the chart (see docs/FINDINGS-2026-08-15.md).
+      resampling_validated: true
+      # Join a trade the strategy is already in at startup. Without this the
+      # bot sits flat while its own chart shows a live long, until the next
+      # full cycle completes. The fill is at today's price, not the signal's,
+      # so the trade is not the one the backtest measured -- but the bracket
+      # is still measured from the signal price, keeping the risk geometry.
+      adopt_open_signal: true
+      # Paper only. Fill the adopted trade at the price its signal fired at,
+      # so this run measures the strategy rather than the penalty for having
+      # started three days into a trade already in progress.
+      adopt_fill: signal
+      params: *svmkr_params
+    execution:
+      mode: same
+      underlying: SILVER100
+      on_sell: exit
+      product: MARGIN
+      order_type: MARKET
+      quantity: 200             # 2 lots = Rs 200 per point
+    risk:
+      sl_points: 50
+      target_points: 250
+      max_trades_per_day: 4
+      square_off_time: null
