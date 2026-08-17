@@ -137,6 +137,12 @@ plans:
       # This is the exact construction the 400-day study ran on, and its bars
       # were checked against the chart (see docs/FINDINGS-2026-08-15.md).
       resampling_validated: true
+      # Join a trade the strategy is already in at startup. Without this the
+      # bot sits flat while its own chart shows a live long, until the next
+      # full cycle completes. The fill is at today's price, not the signal's,
+      # so the trade is not the one the backtest measured -- but the bracket
+      # is still measured from the signal price, keeping the risk geometry.
+      adopt_open_signal: true
       params: *svmkr_params
     execution:
       mode: same
@@ -177,6 +183,12 @@ plans:
       # This is the exact construction the 400-day study ran on, and its bars
       # were checked against the chart (see docs/FINDINGS-2026-08-15.md).
       resampling_validated: true
+      # Join a trade the strategy is already in at startup. Without this the
+      # bot sits flat while its own chart shows a live long, until the next
+      # full cycle completes. The fill is at today's price, not the signal's,
+      # so the trade is not the one the backtest measured -- but the bracket
+      # is still measured from the signal price, keeping the risk geometry.
+      adopt_open_signal: true
       params: *svmkr_params
     execution:
       mode: same

@@ -189,15 +189,27 @@ class GuardChain:
         bar_ts = ctx.signal.bar_ts
         if bar_ts.tzinfo is None:
             bar_ts = bar_ts.replace(tzinfo=IST_TZ)
-        age = (ctx.now - bar_ts).total_seconds()
+        # Age from when the bar CLOSED, not when it opened. A bar carries its
+        # open time, so measuring from that makes every signal look exactly one
+        # timeframe stale the instant it fires — harmless at 5 minutes, but it
+        # blocked every single signal on a 2-hour plan, where a fresh bar is
+        # 7200s old by this arithmetic against a 120s limit.
+        span = 0.0
+        if ctx.plan is not None and ctx.plan.signal.tf.is_intraday:
+            span = (ctx.plan.signal.tf.minutes or 0) * 60
+        raw_age = (ctx.now - bar_ts).total_seconds()
+        age = raw_age - span
         if age > self.risk.signal_staleness_seconds:
             return GuardResult(False, "signal_staleness",
-                               f"bar {bar_ts:%H:%M} is {age:.0f}s old, limit "
+                               f"bar {bar_ts:%H:%M} closed {age:.0f}s ago, limit "
                                f"{self.risk.signal_staleness_seconds}s")
-        if age < -60:
+        # Deliberately the *raw* age: a bar whose OPEN is in the future means a
+        # clock or timezone fault. Its close being in the future is ordinary --
+        # that is just a bar still forming.
+        if raw_age < -60:
             return GuardResult(False, "signal_staleness",
                                f"bar {bar_ts:%H:%M} is in the future by "
-                               f"{-age:.0f}s — clock or timezone problem")
+                               f"{-raw_age:.0f}s — clock or timezone problem")
         return GuardResult.ok()
 
     def _not_duplicate(self, ctx: GuardContext) -> GuardResult:

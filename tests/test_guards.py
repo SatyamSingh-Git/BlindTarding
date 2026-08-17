@@ -425,3 +425,39 @@ class TestOrdering:
             "SELECT guard, allowed FROM guard_events"))
         assert rows and rows[-1]["guard"] == "feed_staleness"
         assert rows[-1]["allowed"] == 0
+
+
+class TestStalenessOnLongTimeframes:
+    """A bar carries its OPEN time, so measuring staleness from it made every
+    2-hour signal look 7200s old against a 120s limit — the guard blocked
+    every trade the plan would ever make."""
+
+    @staticmethod
+    def _ctx(tf: str, minutes_after_close: float):
+        import datetime as dt
+        from orbot.config import SignalConfig, TradePlan
+        from orbot.constants import ExchangeSegment, InstrumentType
+        from orbot.execution.guards import GuardContext, IST_TZ
+        from orbot.models import Action, Signal
+        from orbot.engine.timeframe import Timeframe
+
+        plan = TradePlan(name="p", signal=SignalConfig(
+            exchange_segment=ExchangeSegment.MCX_COMM, security_id="1",
+            instrument_type=InstrumentType.FUTCOM, timeframe=tf))
+        bar = dt.datetime(2026, 8, 17, 9, 0, tzinfo=IST_TZ)
+        span = dt.timedelta(minutes=Timeframe.parse(tf).minutes or 0)
+        now = bar + span + dt.timedelta(minutes=minutes_after_close)
+        sig = Signal(plan="p", action=Action.BUY, bar_ts=bar, price=1.0,
+                     source="engine")
+        return GuardContext(now=now, plan=plan, signal=sig)
+
+    def test_fresh_two_hour_bar_is_allowed(self, chain):
+        assert chain._signal_fresh(self._ctx("2h", 0.2)).allowed
+
+    def test_stale_two_hour_bar_is_still_blocked(self, chain):
+        got = chain._signal_fresh(self._ctx("2h", 30))
+        assert not got.allowed and got.guard == "signal_staleness"
+
+    def test_five_minute_bar_unaffected(self, chain):
+        assert chain._signal_fresh(self._ctx("5m", 0.5)).allowed
+        assert not chain._signal_fresh(self._ctx("5m", 10)).allowed

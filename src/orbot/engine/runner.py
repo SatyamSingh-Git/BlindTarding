@@ -66,6 +66,10 @@ class PlanState:
     # Latched once a bracket exit is scheduled, so the ticks that keep arriving
     # while the exit order is in flight cannot queue a second flatten.
     bracket_fired: bool = False
+    # Where the stop and target are measured from. Normally the fill price;
+    # when a mid-trade signal is adopted it is the signal's price, so the
+    # bracket keeps the geometry the strategy was tested with.
+    bracket_ref_price: float | None = None
     trades_today: int = 0
     last_signal_bar: dt.datetime | None = None
     signals_seen: int = 0
@@ -210,6 +214,53 @@ class TradingEngine:
                         state.position_key = position.key
 
     # --- feed ------------------------------------------------------------
+    async def adopt_open_signals(self) -> None:
+        """Join a trade the strategy is already in, for plans that opt in.
+
+        Starting flat mid-trade means the chart shows a live long while the bot
+        holds nothing, and it stays that way until the *next* full cycle. This
+        closes that gap — but it is opt-in, because the fill happens at today's
+        price rather than the signal's, so the resulting trade is not the one
+        the backtest measured.
+
+        Refused when price has already run past where the stop would sit: by
+        the strategy's own rules that trade is dead, and adopting it would open
+        a position that its own bracket should close immediately.
+        """
+        for state in self.states.values():
+            if not (state.plan.strategy.adopt_open_signal and state.is_flat):
+                continue
+            bars = list(state.series.bars)
+            entry = state.strategy.open_position_entry(bars)
+            if entry is None:
+                continue
+            signal, signal_price = entry
+            price = self.last_prices.get(state.instrument.key) or bars[-1].close
+            drift = price - signal_price
+            sl = state.plan.risk.sl_points
+            if sl is not None and drift <= -abs(sl):
+                log.warning("engine.adopt_skipped", plan=state.name,
+                            signal_price=signal_price, price=price,
+                            detail="price is already past the stop for this signal")
+                self.notifier.send(
+                    f"{state.name}: not adopting the open {signal.action.value} from "
+                    f"{signal.bar_ts:%d %b %H:%M} @ {signal_price:,.2f} — "
+                    f"price is {price:,.2f}, already past its {sl:,.0f}-point stop")
+                continue
+            log.warning("engine.adopting", plan=state.name,
+                        bar=signal.bar_ts.isoformat(),
+                        signal_price=signal_price, fill_price=price, drift=drift)
+            self.notifier.send(
+                f"{state.name}: adopting the open {signal.action.value} signalled "
+                f"{signal.bar_ts:%d %b %H:%M} @ {signal_price:,.2f}\n"
+                f"entering at {price:,.2f} ({drift:+,.2f} vs the signal) — "
+                f"this is not the entry the backtest measured")
+            ctx = await self._context(state, signal)
+            await self._enter(state, signal, ctx)
+            # Measure the bracket from the signal, not from today's fill, so the
+            # trade keeps the risk geometry it was tested with.
+            state.bracket_ref_price = signal_price
+
     def _subscriptions(self) -> list[object]:
         make = self.feed_instrument
         if make is None:
@@ -255,7 +306,7 @@ class TradingEngine:
         if position is None or position.net_qty == 0 or position.avg_price <= 0:
             return
         long = position.net_qty > 0
-        entry = position.avg_price
+        entry = state.bracket_ref_price or position.avg_price
         hit: str | None = None
         if risk.sl_points is not None:
             stop = entry - risk.sl_points if long else entry + risk.sl_points
@@ -342,6 +393,7 @@ class TradingEngine:
         if position is None or position.net_qty == 0:
             state.position_key = None
             state.bracket_fired = False
+            state.bracket_ref_price = None
             return
         try:
             intent = state.resolver.resolve_exit(position, signal=signal)
@@ -397,6 +449,7 @@ class TradingEngine:
             state.trades_today += 1
             position = self.book.get(intent.instrument.key)
             state.bracket_fired = False
+            state.bracket_ref_price = None
             state.position_key = (intent.instrument.key
                                   if position and position.net_qty != 0 else None)
             if is_exit and state.position_key is None:
@@ -466,6 +519,7 @@ class TradingEngine:
                     if state:
                         state.position_key = None
                         state.bracket_fired = False
+                        state.bracket_ref_price = None
             except Exception as exc:
                 log.exception("engine.flatten_failed", position=position.key)
                 self.notifier.error("flatten failed",
@@ -547,6 +601,7 @@ class TradingEngine:
 
         await self.warmup()
         await self.adopt_broker_positions()
+        await self.adopt_open_signals()
 
         if self.make_feed is not None:
             self.feed = self.make_feed(self.on_tick)

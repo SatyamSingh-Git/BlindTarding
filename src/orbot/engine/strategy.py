@@ -235,6 +235,38 @@ class SvmkrUtHmaOrb:
             meta={"stop": result.ut.stop[last], "atr": result.ut.atr[last]},
         )
 
+    def open_position_entry(
+        self, candles: Sequence[Candle]
+    ) -> tuple[Signal, float] | None:
+        """The trade the strategy is currently in, if any.
+
+        Walks back to the most recent BUY or SELL: a BUY with no SELL after it
+        means the strategy considers itself long right now. Used at startup to
+        decide whether the bot is out of step with its own chart.
+
+        Returns the originating signal and the price it fired at, so a caller
+        can see how far the market has moved since.
+        """
+        if len(candles) < self.params.min_bars:
+            return None
+        result = self.evaluate(candles)
+        for i in range(len(result) - 1, -1, -1):
+            if result.sell[i]:
+                return None          # last event was an exit; flat is correct
+            if result.buy[i]:
+                price = result.closes[i]
+                return (
+                    Signal(
+                        plan=self.plan, action=Action.BUY,
+                        bar_ts=result.timestamps[i], price=price,
+                        source="adopted",
+                        reason="open position carried from a previous session",
+                        meta={"stop": result.ut.stop[i], "atr": result.ut.atr[i]},
+                    ),
+                    price,
+                )
+        return None
+
 
 def params_from_config(raw: dict) -> StrategyParams:
     """Build params from a plan's `strategy.params` block, falling back to the

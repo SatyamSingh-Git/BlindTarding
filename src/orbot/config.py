@@ -156,6 +156,11 @@ class StrategyConfig(BaseModel):
     # different chart. The engine therefore refuses such a plan unless someone
     # has actually checked the bars against the chart and says so here.
     resampling_validated: bool = False
+    # On startup, replay the warmed bars and, if the strategy is mid-trade,
+    # open that position at the current market price rather than waiting for
+    # the next entry. Off by default: it buys at a price the backtest never
+    # saw, so the trade it produces is not the trade that was measured.
+    adopt_open_signal: bool = False
     # Anything omitted falls back to the values read off the live chart legend
     # ("3 1 31 5 1010-1015"), NOT the Pine input() defaults — the source
     # defaults ut_key to 2 where the chart runs 3.

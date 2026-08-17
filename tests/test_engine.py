@@ -384,3 +384,65 @@ class TestHaltPropagation:
         eng, _, _ = engine
         eng.killswitch.trip("loss cap")
         assert KillSwitch(eng.killswitch.halt_file).is_halted
+
+
+class TestOpenPositionEntry:
+    """Startup can be mid-trade: the chart shows a live long while a freshly
+    started bot holds nothing. open_position_entry() is how it notices."""
+
+    @staticmethod
+    def _strategy():
+        from orbot.engine.strategy import SvmkrUtHmaOrb, params_from_config
+        return SvmkrUtHmaOrb(params_from_config({"ut_key": 3.0,
+                                                 "ut_atr_period": 1}))
+
+    @staticmethod
+    def _ramp(values):
+        import datetime as dt
+        from orbot.models import Candle
+        t0 = dt.datetime(2026, 8, 3, 9, 0)
+        return [Candle(ts=t0 + dt.timedelta(hours=2 * i), open=v, high=v + 5,
+                       low=v - 5, close=v, volume=1)
+                for i, v in enumerate(values)]
+
+    def test_none_when_history_is_too_short(self):
+        assert self._strategy().open_position_entry(self._ramp([100, 101])) is None
+
+    @staticmethod
+    def _with_signals(buy_at, sell_at, n=140):
+        """A stub result is clearer here than hand-tuning prices until the UT
+        stop happens to cross where the test needs it."""
+        import datetime as dt
+        from unittest.mock import patch
+        from orbot.engine.strategy import SvmkrUtHmaOrb, params_from_config
+
+        t0 = dt.datetime(2026, 8, 3, 9, 0)
+        stub = type("R", (), {
+            "timestamps": [t0 + dt.timedelta(hours=2 * i) for i in range(n)],
+            "closes": [100.0 + i for i in range(n)],
+            "buy": [i in buy_at for i in range(n)],
+            "sell": [i in sell_at for i in range(n)],
+            "ut": type("U", (), {"stop": [0.0] * n, "atr": [1.0] * n})(),
+            "__len__": lambda self: n,
+        })()
+        strat = SvmkrUtHmaOrb(params_from_config({"ut_key": 3.0,
+                                                  "ut_atr_period": 1}))
+        return strat, stub, patch.object(SvmkrUtHmaOrb, "evaluate",
+                                         return_value=stub)
+
+    def test_reports_a_long_that_is_still_open(self):
+        from orbot.models import Action
+        strat, stub, patched = self._with_signals(buy_at={120}, sell_at=set())
+        with patched:
+            got = strat.open_position_entry(self._ramp([100.0] * 140))
+        assert got is not None
+        signal, price = got
+        assert signal.action is Action.BUY
+        assert signal.source == "adopted"
+        assert signal.bar_ts == stub.timestamps[120]
+        assert price == stub.closes[120]
+
+    def test_flat_when_the_last_event_was_an_exit(self):
+        strat, _, patched = self._with_signals(buy_at={120}, sell_at={130})
+        with patched:
+            assert strat.open_position_entry(self._ramp([100.0] * 140)) is None
