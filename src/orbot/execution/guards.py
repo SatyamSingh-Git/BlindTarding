@@ -174,9 +174,10 @@ class GuardChain:
     def _market_open(self, ctx: GuardContext) -> GuardResult:
         """7. Advisory only — the holiday list can be stale, which is why the
         feed-staleness guard is the real backstop."""
-        if not self.calendar.is_open(ctx.now):
+        segment = ctx.plan.signal.exchange_segment if ctx.plan else None
+        if not self.calendar.is_open(ctx.now, segment):
             return GuardResult(False, "market_hours",
-                               f"market {self.calendar.describe(ctx.now)}")
+                               f"market {self.calendar.describe(ctx.now, segment)}")
         return GuardResult.ok()
 
     def _feed_fresh(self, ctx: GuardContext) -> GuardResult:

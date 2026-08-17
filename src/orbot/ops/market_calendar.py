@@ -33,6 +33,9 @@ IST_TZ = ZoneInfo(IST)
 
 NSE_OPEN = dt.time(9, 15)
 NSE_CLOSE = dt.time(15, 30)
+# MCX runs a long evening session; blocking it costs eight hours a day.
+MCX_OPEN = dt.time(9, 0)
+MCX_CLOSE = dt.time(23, 30)
 # Pre-open auction runs 09:00-09:08 with order matching to 09:15. Prices tick
 # during it, but they are auction prices, not continuous trading — signalling
 # off them would be wrong.
@@ -75,8 +78,20 @@ class MarketCalendar:
         )
 
     # --- queries ---------------------------------------------------------
-    def session_window(self, day: dt.date) -> tuple[dt.time, dt.time]:
-        return self.special_sessions.get(day, (self.open_time, self.close_time))
+    def session_window(self, day: dt.date,
+                       segment: object | None = None) -> tuple[dt.time, dt.time]:
+        """Hours for a day, for the exchange being traded.
+
+        NSE and MCX keep very different hours: equities shut at 15:30, while
+        commodities run to 23:30. Applying NSE's close to an MCX plan blocks
+        the entire evening session — eight hours in which plenty of the tested
+        signals fired.
+        """
+        if day in self.special_sessions:
+            return self.special_sessions[day]
+        if getattr(segment, "value", segment) == "MCX_COMM":
+            return (MCX_OPEN, MCX_CLOSE)
+        return (self.open_time, self.close_time)
 
     def is_trading_day(self, day: dt.date) -> bool:
         if day in self.special_sessions:
@@ -85,11 +100,12 @@ class MarketCalendar:
             return False
         return day not in self.holidays
 
-    def is_open(self, when: dt.datetime | None = None) -> bool:
+    def is_open(self, when: dt.datetime | None = None,
+                segment: object | None = None) -> bool:
         when = self._localise(when)
         if not self.is_trading_day(when.date()):
             return False
-        start, end = self.session_window(when.date())
+        start, end = self.session_window(when.date(), segment)
         return start <= when.time() < end
 
     def is_preopen(self, when: dt.datetime | None = None) -> bool:
@@ -113,12 +129,13 @@ class MarketCalendar:
                 return candidate
         return None
 
-    def describe(self, when: dt.datetime | None = None) -> str:
+    def describe(self, when: dt.datetime | None = None,
+                 segment: object | None = None) -> str:
         when = self._localise(when)
         if not self.is_trading_day(when.date()):
             reason = "weekend" if when.weekday() >= 5 else "holiday"
             return f"closed ({reason})"
-        start, end = self.session_window(when.date())
+        start, end = self.session_window(when.date(), segment)
         if self.is_preopen(when):
             return f"pre-open auction, continuous trading from {start:%H:%M}"
         if when.time() < start:

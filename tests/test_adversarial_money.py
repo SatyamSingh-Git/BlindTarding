@@ -412,3 +412,35 @@ class TestPaperPositionsSurviveRestart:
         path.write_text('["a list, not an object"]', encoding="utf-8")
         oms = PaperOMS(starting_funds=300_000.0, state_path=path)
         assert oms.positions() == []
+
+
+class TestExchangeHours:
+    """NSE shuts at 15:30, MCX runs to 23:30. Applying NSE's close to a
+    commodity plan blocked the whole evening session -- and the backtests that
+    chose these plans have entries at 17:00, 19:00, 21:00 and 23:00."""
+
+    @staticmethod
+    def _ctx(hour, segment):
+        from orbot.config import SignalConfig, TradePlan
+        from orbot.execution.guards import GuardContext
+        plan = TradePlan(name="p", signal=SignalConfig(
+            exchange_segment=segment, security_id="1",
+            instrument_type=InstrumentType.FUTCOM, timeframe="2h"))
+        return GuardContext(now=dt.datetime(2026, 8, 17, hour, 0), plan=plan)
+
+    @pytest.mark.parametrize("hour", [17, 19, 21, 23])
+    def test_mcx_evening_session_is_open(self, chain, hour):
+        assert chain._market_open(self._ctx(hour, ExchangeSegment.MCX_COMM)).allowed
+
+    @pytest.mark.parametrize("hour", [17, 21])
+    def test_nse_is_shut_in_the_evening(self, chain, hour):
+        assert not chain._market_open(self._ctx(hour, ExchangeSegment.NSE_EQ)).allowed
+
+    def test_both_are_open_midday(self, chain):
+        for seg in (ExchangeSegment.MCX_COMM, ExchangeSegment.NSE_EQ):
+            assert chain._market_open(self._ctx(11, seg)).allowed
+
+    def test_mcx_is_shut_after_its_own_close(self, chain):
+        ctx = self._ctx(23, ExchangeSegment.MCX_COMM)
+        ctx.now = dt.datetime(2026, 8, 17, 23, 45)
+        assert not chain._market_open(ctx).allowed
