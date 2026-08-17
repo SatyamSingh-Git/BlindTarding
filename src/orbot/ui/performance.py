@@ -87,7 +87,7 @@ class Trade:
         }
 
 
-def pair_trades(result, *, square_off: dt.time, max_trades_per_day: int = 0,
+def pair_trades(result, *, square_off: dt.time | None, max_trades_per_day: int = 0,
                 direction: str = "long", start: dt.datetime | None = None
                 ) -> list[Trade]:
     """Pair signals into trades.
@@ -115,7 +115,9 @@ def pair_trades(result, *, square_off: dt.time, max_trades_per_day: int = 0,
         if start is not None and ts < start:
             continue
         day = ts.date()
-        past_cutoff = ts.time() >= square_off
+        # A plan with no square-off holds across sessions, so no bar is ever
+        # "past the cutoff" and nothing is force-closed at the end of a day.
+        past_cutoff = square_off is not None and ts.time() >= square_off
 
         if open_trade is not None and past_cutoff:
             open_trade.close(ts, result.closes[i], "square-off")
@@ -364,7 +366,8 @@ def performance_payload(plan_name: str, *, bars: int = 1500,
         "sessions": sessions,
         "from": window[0].isoformat() if window else None,
         "to": window[-1].isoformat() if window else None,
-        "square_off": plan.risk.square_off_time.strftime("%H:%M"),
+        "square_off": (plan.risk.square_off_time.strftime("%H:%M")
+                       if plan.risk.square_off_time else "holds overnight"),
         "max_trades_per_day": plan.risk.max_trades_per_day,
         "points": summarise(trades, key="points"),
         "options": summarise(trades, key="option_pnl") if modelled else

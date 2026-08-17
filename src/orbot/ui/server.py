@@ -79,7 +79,8 @@ def build_state() -> dict[str, Any]:
             "segment": p.signal.exchange_segment.value,
             "mode": p.execution.mode,
             "underlying": p.execution.underlying,
-            "square_off": p.risk.square_off_time.strftime("%H:%M"),
+            "square_off": (p.risk.square_off_time.strftime("%H:%M")
+                           if p.risk.square_off_time else "holds overnight"),
             "max_trades": p.risk.max_trades_per_day,
         } for p in plans],
         "realised": 0.0, "unrealised": 0.0, "trades_today": 0,
