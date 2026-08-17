@@ -515,3 +515,54 @@ class TestAdoptFillAtSignalPrice:
     def test_default_is_the_honest_one(self):
         from orbot.config import StrategyConfig
         assert StrategyConfig().adopt_fill == "market"
+
+
+class TestOneAnswerPerQuestion:
+    """The positions panel and the header P&L must not disagree. The broker is
+    authoritative for quantity and average price, but it has never seen a tick
+    -- only the local book marks to market."""
+
+    def test_broker_snapshot_carries_the_local_mark(self):
+        from orbot.execution.positions import PositionBook
+        from orbot.models import Position
+
+        book = PositionBook()
+        book.adopt([Position(security_id=GOLDM.security_id,
+                             segment=GOLDM.segment, net_qty=100,
+                             avg_price=153_327.0)],
+                   multiplier_for=lambda k: 0.1)
+        book.mark(GOLDM.key, 153_600.0)
+
+        # what the broker would report: right size, no mark
+        broker = [Position(security_id=GOLDM.security_id, segment=GOLDM.segment,
+                           net_qty=100, avg_price=153_327.0)]
+        assert broker[0].unrealised == 0.0
+
+        for p in broker:                       # what the engine now does
+            local = book.get(p.key)
+            if local is not None and p.net_qty == local.net_qty:
+                p.unrealised = local.unrealised
+
+        assert broker[0].unrealised == pytest.approx(book.unrealised)
+        assert broker[0].unrealised == pytest.approx(2_730.0)
+
+    def test_a_size_mismatch_leaves_the_broker_untouched(self):
+        """If the two disagree on size, the mark is meaningless -- and the
+        mismatch itself is what matters, so nothing is papered over."""
+        from orbot.execution.positions import PositionBook
+        from orbot.models import Position
+
+        book = PositionBook()
+        book.adopt([Position(security_id=GOLDM.security_id,
+                             segment=GOLDM.segment, net_qty=100,
+                             avg_price=153_327.0)],
+                   multiplier_for=lambda k: 0.1)
+        book.mark(GOLDM.key, 153_600.0)
+
+        broker = [Position(security_id=GOLDM.security_id, segment=GOLDM.segment,
+                           net_qty=50, avg_price=153_327.0)]
+        for p in broker:
+            local = book.get(p.key)
+            if local is not None and p.net_qty == local.net_qty:
+                p.unrealised = local.unrealised
+        assert broker[0].unrealised == 0.0

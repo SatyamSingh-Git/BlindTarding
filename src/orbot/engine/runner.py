@@ -643,6 +643,15 @@ class TradingEngine:
                 log.warning("engine.reconcile_failed", error=str(exc)[:200])
                 continue
             result = self.book.reconcile(broker)
+            # The broker is authoritative for quantity and average price, but it
+            # has not seen a tick -- only the local book marks to market. Taking
+            # the broker's snapshot verbatim showed every position at zero
+            # unrealised next to a header quoting a non-zero P&L, which is two
+            # answers to the same question on one screen.
+            for position in broker:
+                local = self.book.get(position.key)
+                if local is not None and position.net_qty == local.net_qty:
+                    position.unrealised = local.unrealised
             self.journal.snapshot_positions(broker, source="broker")
             if not result.matched:
                 self.killswitch.trip(f"position mismatch: {result.detail}")
