@@ -426,9 +426,17 @@ async function refresh(){
       <td class="mono muted">${fmt(r.meta?.stop)}</td>
       <td class="mono muted">${fmt(r.meta?.atr)}</td></tr>`);
 
+  // Restarting starts a new run, and in paper mode positions from earlier runs
+  // no longer exist. Without marking that, the panel shows four gold buys for
+  // one gold position and nothing says which one you hold.
   table($("#orders"), ["time","instrument","side","qty","avg","status"], s.orders,
-    r=>`<tr><td class="mono">${hhmm(r.created_at)}</td>
-      <td>${r.display_name||r.security_id}</td>
+    r=>`<tr style="${r.current_run===false?'opacity:.42':''}"
+      title="${r.current_run===false
+        ? 'from an earlier run of the engine — this position is no longer held'
+        : 'from the run that is live now'}">
+      <td class="mono">${hhmm(r.created_at)}</td>
+      <td>${r.display_name||r.security_id}${r.current_run===false
+        ? ' <span class="muted">· old run</span>' : ''}</td>
       <td class="${r.transaction_type==='BUY'?'buy':'sell'}">${r.transaction_type}</td>
       <td class="mono">${r.filled_qty||0}/${r.quantity}</td>
       <td class="mono">${fmt(r.avg_price)}</td>

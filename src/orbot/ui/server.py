@@ -101,7 +101,8 @@ def build_state() -> dict[str, Any]:
             state["unrealised"] = float(pnl[0]["unrealised"])
 
         state["trades_today"] = _rows(
-            conn, "SELECT COUNT(*) AS n FROM orders WHERE date(created_at) = ?"
+            conn, "SELECT COUNT(*) AS n FROM orders WHERE"
+                  " substr(created_at,1,10) = ?"
                   " AND status IN ('TRADED','PART_TRADED')", (today,))[0]["n"]
 
         state["signals"] = _rows(
@@ -113,10 +114,18 @@ def build_state() -> dict[str, Any]:
             except ValueError:
                 s["meta"] = {}
 
+        # run_id matters on this table. Restarting the engine starts a new run,
+        # and in paper mode the positions from earlier runs no longer exist --
+        # so without it the panel shows four gold buys for one gold position
+        # and there is no way to tell which one you actually hold.
+        current_run = _rows(conn, "SELECT MAX(id) AS m FROM runs")[0]["m"]
+        state["current_run"] = current_run
         state["orders"] = _rows(
-            conn, "SELECT order_id, plan, display_name, security_id,"
+            conn, "SELECT order_id, plan, display_name, security_id, run_id,"
                   " transaction_type, quantity, filled_qty, avg_price, status,"
                   " mode, created_at FROM orders ORDER BY id DESC LIMIT 40")
+        for o in state["orders"]:
+            o["current_run"] = (o.get("run_id") == current_run)
 
         state["guards"] = _rows(
             conn, "SELECT guard, allowed, detail, plan, created_at"
