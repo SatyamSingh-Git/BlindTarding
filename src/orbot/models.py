@@ -22,12 +22,24 @@ from .constants import (
 )
 
 
-_PRICE_MULTIPLIERS = {
-    # MCX gold is quoted per 10 g while quantity is in grams.
-    "GOLD": 0.1,        # 1 kg contract
-    "GOLDM": 0.1,       # 100 g
-    "GOLDGUINEA": 0.1,
-    "GOLDPETAL": 0.1,
+# How much metal a contract holds, and the unit its price is quoted in.
+# Both in grams, because MCX quotes gold per 10 g and silver per kilogram while
+# expressing quantity in yet another unit.
+#
+# Hardcoding one multiplier per symbol was wrong: GOLD and GOLDM are quoted
+# identically but have different lot sizes, so the same 0.1 that is right for
+# GOLDM made GOLD worth 10 paise a point instead of Rs 100 -- out by a factor
+# of a thousand, silently, on a contract worth Rs 1.55 crore.
+_CONTRACT_SPECS = {
+    # symbol:        (grams in the contract, grams the quote refers to)
+    "GOLD":          (1_000, 10),      # 1 kg,   quoted per 10 g
+    "GOLDM":         (100, 10),        # 100 g,  quoted per 10 g
+    "GOLDGUINEA":    (8, 10),          # 8 g
+    "GOLDPETAL":     (1, 10),          # 1 g
+    "SILVER":        (30_000, 1_000),  # 30 kg,  quoted per kg
+    "SILVERM":       (5_000, 1_000),   # 5 kg
+    "SILVERMIC":     (1_000, 1_000),   # 1 kg
+    "SILVER100":     (1_000, 10),      # 1 kg,   quoted per 10 g
 }
 
 
@@ -54,12 +66,21 @@ class Instrument:
         """Rupees of P&L per 1 unit of quantity per 1 point of price.
 
         Usually 1: buy 200 of something quoted at 2,378 and you are exposed to
-        200 x 2,378. MCX gold breaks that. GOLDM is a 100 gram contract quoted
-        per 10 grams, so 100 quantity at 153,327 is Rs 15.3 lakh of gold, not
-        Rs 15.3 crore, and a 1-point move is worth Rs 10 rather than Rs 100.
-        Taking qty x price literally overstated GOLDM P&L by exactly 10x.
+        200 x 2,378. MCX commodities break that, because the contract size, the
+        quote unit and the quantity unit are three different things.
+
+        Derived rather than tabulated, so it stays right when a contract's lot
+        size differs: one whole contract is worth (grams / quote_grams) rupees
+        per point, spread over `lot_size` units of quantity.
+
+            GOLDM   100 g quoted per 10 g, lot 100  ->  10 / 100  = 0.1
+            GOLD    1 kg quoted per 10 g,  lot 1    ->  100 / 1   = 100
         """
-        return _PRICE_MULTIPLIERS.get(self.symbol.upper(), 1.0)
+        spec = _CONTRACT_SPECS.get(self.symbol.upper())
+        if spec is None or not self.lot_size:
+            return 1.0
+        grams, quote_grams = spec
+        return (grams / quote_grams) / self.lot_size
 
     @property
     def key(self) -> tuple[str, str]:

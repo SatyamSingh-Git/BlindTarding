@@ -566,3 +566,36 @@ class TestOneAnswerPerQuestion:
             if local is not None and p.net_qty == local.net_qty:
                 p.unrealised = local.unrealised
         assert broker[0].unrealised == 0.0
+
+
+class TestContractMultipliersAreDerived:
+    """Hardcoding one multiplier per symbol was wrong: GOLD and GOLDM are
+    quoted identically but have different lot sizes, so the 0.1 that is right
+    for GOLDM made GOLD worth 10 paise a point instead of Rs 100."""
+
+    @staticmethod
+    def _inst(symbol, lot):
+        return Instrument(security_id="1", segment=ExchangeSegment.MCX_COMM,
+                          instrument_type=InstrumentType.FUTCOM, symbol=symbol,
+                          display_name=symbol, lot_size=lot)
+
+    @pytest.mark.parametrize("symbol,lot,rupees_per_point", [
+        ("GOLD", 1, 100),        # 1 kg quoted per 10 g
+        ("GOLDM", 100, 10),      # 100 g quoted per 10 g
+        ("GOLDGUINEA", 8, 0.8),
+        ("SILVER", 30, 30),      # 30 kg quoted per kg
+        ("SILVERM", 5, 5),
+        ("SILVERMIC", 1, 1),
+        ("SILVER100", 100, 100), # 1 kg quoted per 10 g
+    ])
+    def test_one_lot_is_worth_the_right_amount_per_point(
+            self, symbol, lot, rupees_per_point):
+        inst = self._inst(symbol, lot)
+        assert inst.lot_size * inst.price_multiplier == pytest.approx(
+            rupees_per_point)
+
+    def test_an_unknown_symbol_falls_back_to_one_for_one(self):
+        assert self._inst("NIFTY", 65).price_multiplier == 1.0
+
+    def test_a_zero_lot_size_does_not_divide_by_zero(self):
+        assert self._inst("GOLDM", 0).price_multiplier == 1.0
