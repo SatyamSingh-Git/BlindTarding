@@ -43,7 +43,7 @@ from ..ops.journal import DuplicateSignal, Journal
 from ..ops.killswitch import KillSwitch
 from ..ops.market_calendar import MarketCalendar
 from ..ops.notifier import Notifier
-from .candles import CandleSeries
+from .candles import CandleSeries, session_start_for
 from .history import warmup_candles
 from .strategy import SvmkrUtHmaOrb, params_from_config
 from .timeframe import Timeframe
@@ -139,7 +139,8 @@ class TradingEngine:
             plan=plan,
             instrument=instrument,
             timeframe=timeframe,
-            series=CandleSeries(timeframe.minutes),
+            series=CandleSeries(timeframe.minutes,
+                                session_start=session_start_for(instrument.segment)),
             strategy=SvmkrUtHmaOrb(params, plan=plan.name),
             resolver=ExecutionResolver(self.registry, plan),
         )

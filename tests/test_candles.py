@@ -153,3 +153,36 @@ class TestSeed:
 
 # Resampling to larger timeframes lives in test_timeframe.py — it is a
 # timeframe concern, not a tick-aggregation one.
+
+
+class TestSessionAnchorPerExchange:
+    """MCX opens at 09:00, NSE at 09:15. Anchoring both to 09:15 put MCX
+    2-hour bars on 07:15/09:15/11:15 boundaries — bars no chart draws and no
+    backtest was run against."""
+
+    def test_mcx_anchors_to_nine(self):
+        from orbot.constants import ExchangeSegment
+        from orbot.engine.candles import MCX_SESSION_START, session_start_for
+        assert session_start_for(ExchangeSegment.MCX_COMM) == MCX_SESSION_START
+
+    def test_nse_anchors_to_nine_fifteen(self):
+        from orbot.constants import ExchangeSegment
+        from orbot.engine.candles import NSE_SESSION_START, session_start_for
+        for seg in (ExchangeSegment.NSE_EQ, ExchangeSegment.NSE_FNO,
+                    ExchangeSegment.IDX_I):
+            assert session_start_for(seg) == NSE_SESSION_START
+
+    def test_mcx_two_hour_bars_open_on_the_hour(self):
+        import datetime as dt
+        from orbot.constants import ExchangeSegment
+        from orbot.engine.candles import resample_to, session_start_for
+        from orbot.engine.timeframe import Timeframe
+        from orbot.models import Candle
+
+        base = [Candle(ts=dt.datetime(2026, 8, 17, 9, 0) + dt.timedelta(hours=i),
+                       open=100, high=101, low=99, close=100, volume=1)
+                for i in range(8)]
+        out = resample_to(base, Timeframe.parse("2h"),
+                          session_start=session_start_for(ExchangeSegment.MCX_COMM))
+        assert [c.ts.strftime("%H:%M") for c in out] == ["09:00", "11:00",
+                                                         "13:00", "15:00"]

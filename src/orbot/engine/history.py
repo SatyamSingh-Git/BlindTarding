@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from ..models import Candle, Instrument
-from .candles import NSE_SESSION_START, resample_to
+from .candles import resample_to, session_start_for
 from .timeframe import Timeframe
 
 if TYPE_CHECKING:  # avoids a broker <-> engine import cycle at runtime
@@ -34,7 +34,7 @@ def fetch_candles(
     start: dt.datetime,
     end: dt.datetime,
     *,
-    session_start: dt.time = NSE_SESSION_START,
+    session_start: dt.time | None = None,
 ) -> list[Candle]:
     """Fetch bars at `timeframe`, resampling from a native interval if needed."""
     if timeframe.is_intraday:
@@ -45,7 +45,9 @@ def fetch_candles(
     if not timeframe.needs_resampling:
         return base
 
-    out = resample_to(base, timeframe, session_start=session_start)
+    out = resample_to(base, timeframe,
+                      session_start=session_start
+                      or session_start_for(instrument.segment))
     log.info("history.resampled", timeframe=timeframe.label,
              base_interval=timeframe.base_interval, base_bars=len(base),
              out_bars=len(out))

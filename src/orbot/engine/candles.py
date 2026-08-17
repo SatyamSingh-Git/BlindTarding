@@ -37,6 +37,18 @@ NSE_SESSION_START = dt.time(9, 15)
 MCX_SESSION_START = dt.time(9, 0)
 
 
+def session_start_for(segment: object) -> dt.time:
+    """Which clock a resampled bar is anchored to.
+
+    Bucketing is session-anchored, so the anchor has to match the exchange or
+    every bar boundary lands in the wrong place. Defaulting MCX to NSE's 09:15
+    produced 07:15/09:15/11:15 buckets on a market that opens at 09:00 — bars
+    that no chart shows and that no backtest was ever run against.
+    """
+    return (MCX_SESSION_START if getattr(segment, "value", segment) == "MCX_COMM"
+            else NSE_SESSION_START)
+
+
 class CandleSeries:
     """Rolling OHLCV for one instrument at one timeframe."""
 
@@ -278,4 +290,4 @@ def resample_to(
 
 
 __all__ = ["CandleSeries", "CandleBook", "resample_to",
-           "NSE_SESSION_START", "MCX_SESSION_START"]
+           "NSE_SESSION_START", "MCX_SESSION_START", "session_start_for"]
