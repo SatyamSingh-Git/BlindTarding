@@ -483,3 +483,48 @@ class TestPaperOMS:
         oms = PaperOMS()
         order = oms.place(intent_for(TransactionType.BUY, 65), reference_price=120.0)
         assert oms.settle(order, timeout=0.1).status.is_terminal
+
+
+class TestPaperFundsByProduct:
+    """Buying a future blocks margin; buying a call costs the whole premium.
+    Charging notional for both drove a Rs 3 lakh paper account to minus
+    Rs 1.5 crore the first time it bought a gold future."""
+
+    @staticmethod
+    def _future_intent(side, qty):
+        from orbot.constants import (ExchangeSegment, InstrumentType, OrderType,
+                                     ProductType)
+        from orbot.models import Instrument, OrderIntent
+        inst = Instrument(security_id="563946", segment=ExchangeSegment.MCX_COMM,
+                          symbol="GOLDM", display_name="GOLDM04SEP26FUT",
+                          instrument_type=InstrumentType.FUTCOM, lot_size=100)
+        return OrderIntent(instrument=inst, transaction_type=side, quantity=qty,
+                           order_type=OrderType.MARKET,
+                           product_type=ProductType.MARGIN, plan="goldm-2h")
+
+    def test_a_future_blocks_margin_not_notional(self):
+        from orbot.constants import TransactionType
+        from orbot.execution.oms import PaperOMS
+
+        oms = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0,
+                       margin_pct=0.11)
+        oms.place(self._future_intent(TransactionType.BUY, 100),
+                  reference_price=153_327.0)
+        # GOLDM is 100 g quoted per 10 g, so the contract is Rs 15.3 lakh and
+        # margin is 11% of that -- not 11% of a fictional Rs 15.3 crore.
+        assert oms.available_funds() == pytest.approx(
+            300_000 - 153_327 * 100 * 0.1 * 0.11)
+        assert oms.available_funds() > 0
+
+    def test_margin_is_released_and_pnl_realised_on_exit(self):
+        from orbot.constants import TransactionType
+        from orbot.execution.oms import PaperOMS
+
+        oms = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0)
+        oms.place(self._future_intent(TransactionType.BUY, 100),
+                  reference_price=150_000.0)
+        oms.place(self._future_intent(TransactionType.SELL, 100),
+                  reference_price=150_100.0)
+        assert oms.positions() == []
+        # 100 points at Rs 10 a point = Rs 1,000, and every rupee of margin back
+        assert oms.available_funds() == pytest.approx(301_000.0)

@@ -22,6 +22,15 @@ from .constants import (
 )
 
 
+_PRICE_MULTIPLIERS = {
+    # MCX gold is quoted per 10 g while quantity is in grams.
+    "GOLD": 0.1,        # 1 kg contract
+    "GOLDM": 0.1,       # 100 g
+    "GOLDGUINEA": 0.1,
+    "GOLDPETAL": 0.1,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class Instrument:
     """One tradeable (or observable) line from the scrip master."""
@@ -39,6 +48,18 @@ class Instrument:
     underlying_symbol: str | None = None
     series: str | None = None
     freeze_qty: int | None = None
+
+    @property
+    def price_multiplier(self) -> float:
+        """Rupees of P&L per 1 unit of quantity per 1 point of price.
+
+        Usually 1: buy 200 of something quoted at 2,378 and you are exposed to
+        200 x 2,378. MCX gold breaks that. GOLDM is a 100 gram contract quoted
+        per 10 grams, so 100 quantity at 153,327 is Rs 15.3 lakh of gold, not
+        Rs 15.3 crore, and a 1-point move is worth Rs 10 rather than Rs 100.
+        Taking qty x price literally overstated GOLDM P&L by exactly 10x.
+        """
+        return _PRICE_MULTIPLIERS.get(self.symbol.upper(), 1.0)
 
     @property
     def key(self) -> tuple[str, str]:

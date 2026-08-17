@@ -36,7 +36,8 @@ from zoneinfo import ZoneInfo
 import structlog
 
 from ..broker.dhan_client import DhanAPIError, DhanClient, OrderStateUnknown
-from ..constants import IST, OrderStatus, OrderType, TransactionType
+from ..constants import (IST, OPTION_TYPES, InstrumentType, OrderStatus,
+                         OrderType, TransactionType)
 from ..models import Order, OrderIntent, Position
 
 log = structlog.get_logger(__name__)
@@ -107,11 +108,21 @@ class PaperOMS(OMS):
     mode = "paper"
 
     def __init__(self, *, starting_funds: float = 1_000_000.0,
-                 slippage_pct: float = 0.05) -> None:
+                 slippage_pct: float = 0.05,
+                 margin_pct: float = 0.11) -> None:
         self.funds = starting_funds
+        self.starting_funds = starting_funds
         self.slippage_pct = slippage_pct
+        # Futures and options are margin products: buying one blocks a fraction
+        # of the contract value, it does not cost the contract value. Charging
+        # the full notional drove paper funds to minus Rs 1.5 crore on a
+        # Rs 3 lakh account the first time a gold future was bought.
+        self.margin_pct = margin_pct
         self._orders: dict[str, Order] = {}
         self._positions: dict[tuple[str, str], Position] = {}
+        self._marks: dict[tuple[str, str], float] = {}
+        self._kinds: dict[tuple[str, str], InstrumentType] = {}
+        self._multipliers: dict[tuple[str, str], float] = {}
 
     def place(self, intent: OrderIntent, *, reference_price: float | None = None) -> Order:
         price = reference_price or intent.price
@@ -142,13 +153,49 @@ class PaperOMS(OMS):
         )
         self._orders[order.order_id] = order
         self._apply(intent, order)
-
-        cash = fill * intent.quantity
-        self.funds += -cash if intent.transaction_type is TransactionType.BUY else cash
+        self._marks[intent.instrument.key] = fill
+        self._kinds[intent.instrument.key] = intent.instrument.instrument_type
+        self._multipliers[intent.instrument.key] = intent.instrument.price_multiplier
+        self._recompute_funds()
         log.info("oms.paper_fill", instrument=intent.instrument.display_name,
                  side=intent.transaction_type.value, qty=intent.quantity,
-                 price=round(fill, 2), funds=round(self.funds, 2))
+                 price=round(fill, 2), funds=round(self.funds, 2),
+                 blocked=round(self._blocked_margin(), 2))
         return order
+
+    def _blocked_margin(self) -> float:
+        """Capital tied up by open positions.
+
+        Three different things, and conflating them is how paper funds went to
+        minus Rs 1.5 crore on a Rs 3 lakh account:
+
+        * a **future** blocks margin, a fraction of contract value;
+        * a **long option** costs its full premium — there is nothing to
+          margin, you have already paid;
+        * a **short option** blocks margin, like a future.
+        """
+        total = 0.0
+        for key, position in self._positions.items():
+            if position.net_qty == 0:
+                continue
+            kind = self._kinds.get(key)
+            price = self._marks.get(key) or position.avg_price
+            notional = (abs(position.net_qty) * price
+                        * self._multipliers.get(key, 1.0))
+            if kind in OPTION_TYPES and position.net_qty > 0:
+                total += notional                     # premium paid in full
+            elif kind is InstrumentType.EQUITY:
+                total += notional                     # cash segment
+            else:
+                total += notional * self.margin_pct   # futures, short options
+        return total
+
+    def _recompute_funds(self) -> None:
+        """Cash = what you started with, plus what you have realised, minus what
+        is currently tied up as margin. Derived rather than accumulated, so a
+        partial exit cannot leave a stale blocked amount behind."""
+        realised = sum(p.realised for p in self._positions.values())
+        self.funds = self.starting_funds + realised - self._blocked_margin()
 
     def _apply(self, intent: OrderIntent, order: Order) -> None:
         key = intent.instrument.key
@@ -163,7 +210,9 @@ class PaperOMS(OMS):
         if position.net_qty != 0 and (position.net_qty > 0) != (signed > 0):
             closed = min(abs(signed), abs(position.net_qty))
             direction = 1 if position.net_qty > 0 else -1
-            position.realised += direction * closed * (order.avg_price - position.avg_price)
+            position.realised += (direction * closed
+                                  * (order.avg_price - position.avg_price)
+                                  * intent.instrument.price_multiplier)
         if new_qty != 0 and (position.net_qty == 0 or (position.net_qty > 0) == (signed > 0)):
             total = position.avg_price * abs(position.net_qty) + order.avg_price * abs(signed)
             position.avg_price = total / abs(new_qty)
