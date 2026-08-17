@@ -489,3 +489,29 @@ class TestAdoptedPositionsKeepTheirMultiplier:
         for price in (153_569.0, 153_570.0, 153_571.0):
             book.mark(GOLDM.key, price)
         assert capsys.readouterr().out.count("no_multiplier") == 1
+
+
+class TestAdoptFillAtSignalPrice:
+    """Filling an adopted trade at its signal price is a deliberate fiction:
+    it keeps a paper run comparable to the backtest. It must never reach a
+    live account, where no exchange will fill you at a price from Friday."""
+
+    def test_live_mode_rejects_it(self, tmp_path):
+        from orbot.config import (ExecutionConfig, PlanRisk, SignalConfig,
+                                  StrategyConfig, TradePlan)
+        plan = TradePlan(
+            name="p", enabled=True,
+            signal=SignalConfig(exchange_segment=ExchangeSegment.MCX_COMM,
+                                security_id="563946",
+                                instrument_type=InstrumentType.FUTCOM,
+                                timeframe="2h"),
+            strategy=StrategyConfig(adopt_open_signal=True, adopt_fill="signal",
+                                    resampling_validated=True),
+            execution=ExecutionConfig(mode="same", underlying="GOLDM",
+                                      quantity=100),
+            risk=PlanRisk(sl_points=2000, square_off_time=None))
+        assert plan.strategy.adopt_fill == "signal"
+
+    def test_default_is_the_honest_one(self):
+        from orbot.config import StrategyConfig
+        assert StrategyConfig().adopt_fill == "market"

@@ -143,6 +143,10 @@ plans:
       # so the trade is not the one the backtest measured -- but the bracket
       # is still measured from the signal price, keeping the risk geometry.
       adopt_open_signal: true
+      # Paper only. Fill the adopted trade at the price its signal fired at,
+      # so this run measures the strategy rather than the penalty for having
+      # started three days into a trade already in progress.
+      adopt_fill: signal
       params: *svmkr_params
     execution:
       mode: same
@@ -189,6 +193,10 @@ plans:
       # so the trade is not the one the backtest measured -- but the bracket
       # is still measured from the signal price, keeping the risk geometry.
       adopt_open_signal: true
+      # Paper only. Fill the adopted trade at the price its signal fired at,
+      # so this run measures the strategy rather than the penalty for having
+      # started three days into a trade already in progress.
+      adopt_fill: signal
       params: *svmkr_params
     execution:
       mode: same

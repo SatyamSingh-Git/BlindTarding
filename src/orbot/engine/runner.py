@@ -156,6 +156,14 @@ class TradingEngine:
             problems.append("no enabled plans — nothing to run")
         today = dt.datetime.now(IST_TZ).date()
         for state in self.states.values():
+            if (state.plan.strategy.adopt_fill == "signal"
+                    and self.oms.mode == "live"):
+                problems.append(
+                    f"plan {state.name!r} sets adopt_fill: signal, which fills an "
+                    "adopted trade at a price from the past. That is a paper-only "
+                    "fiction for keeping a run comparable to the backtest — no "
+                    "exchange will fill you there. Use 'market' for live."
+                )
             problems.extend(state.resolver.validate())
             expiry = state.instrument.expiry
             if expiry is not None and expiry < today:
@@ -277,6 +285,8 @@ class TradingEngine:
                 continue
             signal, signal_price = entry
             price = self.last_prices.get(state.instrument.key) or bars[-1].close
+            at_signal = (state.plan.strategy.adopt_fill == "signal"
+                         and self.oms.mode == "paper")
             drift = price - signal_price
             sl = state.plan.risk.sl_points
             if sl is not None and drift <= -abs(sl):
@@ -323,7 +333,8 @@ class TradingEngine:
                          key=signal.dedupe_key,
                          detail="already acted on this signal in an earlier run")
                 continue
-            await self._enter(state, signal, ctx)
+            await self._enter(state, signal, ctx,
+                              fill_price=signal_price if at_signal else None)
             # Measure the bracket from the signal, not from today's fill, so the
             # trade keeps the risk geometry it was tested with.
             state.bracket_ref_price = signal_price
@@ -437,7 +448,8 @@ class TradingEngine:
         else:
             await self._exit(state, signal, ctx)
 
-    async def _enter(self, state: PlanState, signal: Signal, ctx: GuardContext) -> None:
+    async def _enter(self, state: PlanState, signal: Signal, ctx: GuardContext,
+                     *, fill_price: float | None = None) -> None:
         if not state.is_flat:
             log.info("engine.already_long", plan=state.name,
                      detail="BUY while already holding; ignoring")
@@ -449,7 +461,7 @@ class TradingEngine:
             log.error("engine.resolve_failed", plan=state.name, error=str(exc))
             self.notifier.error("could not resolve contract", f"{state.name}: {exc}")
             return
-        await self._send(state, intent, ctx)
+        await self._send(state, intent, ctx, fill_price=fill_price)
 
     async def _exit(self, state: PlanState, signal: Signal, ctx: GuardContext) -> None:
         if state.is_flat:
@@ -471,8 +483,9 @@ class TradingEngine:
         await self._send(state, intent, ctx, is_exit=True)
 
     async def _send(self, state: PlanState, intent, ctx: GuardContext,
-                    *, is_exit: bool = False) -> None:
-        reference = self.last_prices.get(intent.instrument.key)
+                    *, is_exit: bool = False,
+                    fill_price: float | None = None) -> None:
+        reference = fill_price or self.last_prices.get(intent.instrument.key)
         if (reference is None and intent.signal is not None
                 and intent.instrument.key == state.instrument.key):
             # Fall back to the signal's price *before* the guards run, not

@@ -167,6 +167,18 @@ class StrategyConfig(BaseModel):
     # the next entry. Off by default: it buys at a price the backtest never
     # saw, so the trade it produces is not the trade that was measured.
     adopt_open_signal: bool = False
+    # Where an adopted trade is filled.
+    #
+    #   "market" — at the price now. What a live account would really get, and
+    #              the only honest choice with real money.
+    #   "signal" — at the price the signal fired at, days ago if need be. A
+    #              fiction, and deliberately so: it reproduces the entry the
+    #              backtest assumed, so a paper run mid-strategy stays
+    #              comparable to the study instead of carrying a one-off
+    #              entry penalty for having started late.
+    #
+    # Rejected outright in live mode: you cannot be filled at a past price.
+    adopt_fill: Literal["market", "signal"] = "market"
     # Anything omitted falls back to the values read off the live chart legend
     # ("3 1 31 5 1010-1015"), NOT the Pine input() defaults — the source
     # defaults ut_key to 2 where the chart runs 3.
