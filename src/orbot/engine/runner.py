@@ -789,6 +789,13 @@ class TradingEngine:
                            f"plans: {', '.join(self.states)}\n"
                            f"market: {self.calendar.describe(segment=segment)}")
 
+        # What the last run left on screen, so the first reconciliation can
+        # explicitly clear anything that has closed since.
+        try:
+            self._snapshotted = self.journal.last_snapshot_keys()
+        except Exception as exc:
+            log.warning("engine.snapshot_seed_failed", error=str(exc)[:120])
+
         await self.warmup()
         await self.adopt_broker_positions()
 

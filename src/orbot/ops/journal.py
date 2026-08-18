@@ -251,6 +251,21 @@ class Journal:
         row = self.conn.execute(sql, args).fetchone()
         return int(row["n"]) if row else 0
 
+    def last_snapshot_keys(self, *, source: str = "broker") -> set[tuple[str, str]]:
+        """Instruments open in the most recent snapshot batch.
+
+        Seeds the engine at startup so its first reconciliation can write an
+        explicit zero for anything that has closed since -- otherwise a
+        position that went flat while the bot was down stays on screen forever,
+        because a snapshot of nothing writes nothing.
+        """
+        rows = self.conn.execute(
+            "SELECT segment, security_id FROM position_snapshots"
+            " WHERE source = ? AND net_qty != 0 AND taken_at ="
+            " (SELECT MAX(taken_at) FROM position_snapshots WHERE source = ?)",
+            (source, source)).fetchall()
+        return {(r["segment"], r["security_id"]) for r in rows}
+
     # --- guards ----------------------------------------------------------
     def record_guard(self, guard: str, allowed: bool, detail: str, *,
                      plan: str | None = None, signal_key: str | None = None) -> None:

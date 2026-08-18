@@ -825,3 +825,36 @@ class TestTradeCapFitsTheTimeframe:
             risk=PlanRisk(max_trades_per_day=10))
         ctx = GuardContext(now=dt.datetime.now(), plan=plan, trades_today=10)
         assert not chain._trades_today(ctx).allowed
+
+
+class TestPositionsPanelShowsNow:
+    """"Latest snapshot" means the most recent batch. Taking the most recent
+    row per instrument with no time bound kept yesterday's closed positions on
+    screen all of the next day."""
+
+    @staticmethod
+    def _db(tmp_path):
+        import sqlite3
+        from orbot.ops.journal import Journal
+        j = Journal(tmp_path / "j.db")
+        j.start_run("paper")
+        return j, sqlite3.connect(tmp_path / "j.db")
+
+    def test_yesterdays_open_position_does_not_survive_today(self, tmp_path):
+        from orbot.models import Position
+        j, con = self._db(tmp_path)
+        gold = Position(security_id="563946", segment=ExchangeSegment.MCX_COMM,
+                        net_qty=100, avg_price=153_327.0)
+        j.snapshot_positions([gold], source="broker")     # yesterday: open
+        assert j.last_snapshot_keys() == {("MCX_COMM", "563946")}
+        # today the engine knows it was open, so it records the close explicitly
+        flat = Position(security_id="563946", segment=ExchangeSegment.MCX_COMM,
+                        net_qty=0, avg_price=0.0)
+        j.snapshot_positions([flat], source="broker")
+        con.row_factory = None
+        rows = con.execute(
+            "SELECT security_id FROM position_snapshots WHERE source='broker'"
+            " AND net_qty != 0 AND taken_at = (SELECT MAX(taken_at) FROM"
+            " position_snapshots WHERE source='broker')").fetchall()
+        j.close(); con.close()
+        assert rows == [], "a position closed since the last snapshot still shows"

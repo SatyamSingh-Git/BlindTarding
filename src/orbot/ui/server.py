@@ -143,13 +143,17 @@ def build_state() -> dict[str, Any]:
             conn, "SELECT guard, allowed, detail, plan, created_at"
                   " FROM guard_events ORDER BY id DESC LIMIT 40")
 
-        # Latest broker snapshot per instrument, so the page shows what the
-        # broker last confirmed rather than what we hoped.
+        # The latest snapshot means the most recent *batch*, not the most
+        # recent row per instrument. Grouping per instrument with no time bound
+        # kept yesterday's closed positions on screen indefinitely -- gold and
+        # silver both showed open all evening from a 23:59 snapshot, while the
+        # broker had been flat since the morning.
         state["positions"] = _rows(
             conn, "SELECT security_id, segment, net_qty, avg_price, realised,"
-                  " unrealised, MAX(taken_at) AS taken_at FROM position_snapshots"
-                  " WHERE source = 'broker' GROUP BY security_id, segment"
-                  " HAVING net_qty != 0")
+                  " unrealised, taken_at FROM position_snapshots"
+                  " WHERE source = 'broker' AND net_qty != 0 AND taken_at ="
+                  " (SELECT MAX(taken_at) FROM position_snapshots"
+                  "  WHERE source = 'broker')")
     finally:
         conn.close()
     return state
