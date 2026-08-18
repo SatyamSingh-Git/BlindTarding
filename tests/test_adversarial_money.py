@@ -858,3 +858,49 @@ class TestPositionsPanelShowsNow:
             " position_snapshots WHERE source='broker')").fetchall()
         j.close(); con.close()
         assert rows == [], "a position closed since the last snapshot still shows"
+
+
+class TestRealisedPnlSurvivesARestart:
+    """The position book is rebuilt from nothing each run, so a day's booked
+    profit vanished the moment the engine was bounced -- the dashboard read
+    Rs 0 on a day that had banked Rs 1,710."""
+
+    @staticmethod
+    def _oms(tmp_path):
+        from orbot.execution.oms import PaperOMS
+        return PaperOMS(starting_funds=300_000.0, slippage_ticks=0,
+                        state_path=tmp_path / "paper.json")
+
+    def test_a_closed_trade_is_remembered_across_a_restart(self, tmp_path):
+        import datetime as dt
+        from orbot.constants import TransactionType
+        one = self._oms(tmp_path)
+        one.place(intent(GOLDM, 100), reference_price=150_000.0)
+        one.place(intent(GOLDM, 100, TransactionType.SELL),
+                  reference_price=150_500.0)
+        today = dt.date.today()
+        assert one.realised_on(today) == pytest.approx(5_000.0)
+
+        two = self._oms(tmp_path)          # restart
+        assert two.positions() == []
+        assert two.realised_on(today) == pytest.approx(5_000.0)
+
+    def test_a_day_with_no_trades_reports_zero(self, tmp_path):
+        import datetime as dt
+        assert self._oms(tmp_path).realised_on(dt.date(2020, 1, 1)) == 0.0
+
+    def test_days_are_kept_apart(self, tmp_path):
+        import datetime as dt
+        from orbot.constants import TransactionType
+        oms = self._oms(tmp_path)
+        oms.place(intent(GOLDM, 100), reference_price=150_000.0)
+        oms.place(intent(GOLDM, 100, TransactionType.SELL),
+                  reference_price=150_500.0)
+        assert oms.realised_on(dt.date.today()) == pytest.approx(5_000.0)
+        assert oms.realised_on(dt.date.today() - dt.timedelta(days=1)) == 0.0
+
+    def test_a_live_broker_reports_nothing_here(self):
+        """Only the simulator needs this memory; live has its own."""
+        import datetime as dt
+        from orbot.execution.oms import LiveOMS
+        assert LiveOMS.realised_on(object(), dt.date.today()) == 0.0

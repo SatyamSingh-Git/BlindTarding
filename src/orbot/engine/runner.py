@@ -612,11 +612,21 @@ class TradingEngine:
             contract_expiry=state.instrument.expiry if state else None,
         )
 
+    def _realised_today(self) -> float:
+        """Realised P&L for today, including anything booked before a restart.
+
+        The position book is rebuilt from nothing each run, so reading realised
+        P&L from it reported Rs 0 on a day that had already banked Rs 1,710 --
+        every restart silently erased the day's result.
+        """
+        carried = self.oms.realised_on(dt.datetime.now(IST_TZ).date())
+        return carried if carried else self.book.realised
+
     async def _maybe_halt(self, verdict: GuardResult) -> None:
         if not verdict.halt:
             return
         self.killswitch.trip(f"{verdict.guard}: {verdict.detail}")
-        self.journal.update_daily_pnl(self.book.realised, self.book.unrealised,
+        self.journal.update_daily_pnl(self._realised_today(), self.book.unrealised,
                                       halted=True)
         self.notifier.halted(f"{verdict.guard}\n{verdict.detail}")
         if verdict.flatten:
@@ -727,7 +737,7 @@ class TradingEngine:
                 self.notifier.halted(f"POSITION MISMATCH\n{result.detail}\n\n"
                                      "Local book disagrees with the broker. "
                                      "Resolve manually before resuming.")
-            self.journal.update_daily_pnl(self.book.realised, self.book.unrealised,
+            self.journal.update_daily_pnl(self._realised_today(), self.book.unrealised,
                                           halted=self.killswitch.is_halted)
 
     async def _square_off_loop(self) -> None:
@@ -833,7 +843,7 @@ class TradingEngine:
             await self.feed.stop()
         for task in self._tasks:
             task.cancel()
-        self.journal.update_daily_pnl(self.book.realised, self.book.unrealised,
+        self.journal.update_daily_pnl(self._realised_today(), self.book.unrealised,
                                       halted=self.killswitch.is_halted)
         self.journal.end_run()
         self.notifier.send(

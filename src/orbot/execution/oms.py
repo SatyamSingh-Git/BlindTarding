@@ -71,6 +71,11 @@ class OMS(ABC):
     def available_funds(self) -> float | None:
         ...
 
+    def realised_on(self, day) -> float:
+        """Realised P&L booked on a given day. Only the simulator needs to
+        remember this; a live broker reports its own."""
+        return 0.0
+
     def settle(self, order: Order, *, timeout: float = 20.0,
                interval: float = 0.5) -> Order:
         """Poll until terminal or the timeout expires.
@@ -129,6 +134,11 @@ class PaperOMS(OMS):
         self._positions: dict[tuple[str, str], Position] = {}
         self._marks: dict[tuple[str, str], float] = {}
         self._kinds: dict[tuple[str, str], InstrumentType] = {}
+        # Realised P&L per calendar day. Held only in the position book, it
+        # reset to zero on every restart -- so a day's booked profit vanished
+        # the moment the engine was bounced, and the dashboard read Rs 0 on a
+        # day that had banked Rs 1,710.
+        self._realised_by_day: dict[str, float] = {}
         self._multipliers: dict[tuple[str, str], float] = {}
         # A live broker remembers your positions across a restart; an in-memory
         # simulator does not, and the duplicate-signal guard then correctly
@@ -174,7 +184,13 @@ class PaperOMS(OMS):
             raw={"simulated": True, "reference_price": price},
         )
         self._orders[order.order_id] = order
+        before = sum(p.realised for p in self._positions.values())
         self._apply(intent, order)
+        booked = sum(p.realised for p in self._positions.values()) - before
+        if booked:
+            today = dt.datetime.now(IST_TZ).date().isoformat()
+            self._realised_by_day[today] = (
+                self._realised_by_day.get(today, 0.0) + booked)
         self._marks[intent.instrument.key] = fill
         self._kinds[intent.instrument.key] = intent.instrument.instrument_type
         self._multipliers[intent.instrument.key] = intent.instrument.price_multiplier
@@ -263,6 +279,10 @@ class PaperOMS(OMS):
     def available_funds(self) -> float | None:
         return self.funds
 
+    def realised_on(self, day: dt.date) -> float:
+        """Realised P&L booked on one day, across restarts."""
+        return self._realised_by_day.get(day.isoformat(), 0.0)
+
     # --- persistence -----------------------------------------------------
     def _restore(self) -> None:
         if self._state_path is None or not self._state_path.exists():
@@ -274,6 +294,9 @@ class PaperOMS(OMS):
             return
         if not isinstance(raw, dict):
             return
+        by_day = raw.get("realised_by_day")
+        if isinstance(by_day, dict):
+            self._realised_by_day = {str(k): float(v) for k, v in by_day.items()}
         for row in raw.get("positions", []):
             try:
                 key = (row["segment"], row["security_id"])
@@ -296,7 +319,7 @@ class PaperOMS(OMS):
     def _persist(self) -> None:
         if self._state_path is None:
             return
-        payload = {"positions": [
+        payload = {"realised_by_day": self._realised_by_day, "positions": [
             {"security_id": p.security_id, "segment": p.segment.value,
              "net_qty": p.net_qty, "avg_price": p.avg_price,
              "realised": p.realised, "mark": self._marks.get(k, p.avg_price),
