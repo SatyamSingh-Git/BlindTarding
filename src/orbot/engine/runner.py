@@ -767,9 +767,14 @@ class TradingEngine:
         self._running = True
         mode_note = ("PAPER — simulated fills, no real orders" if self.oms.mode == "paper"
                      else "LIVE — real money")
+        # Describe the exchange the plans actually trade. Reporting NSE here
+        # put "354 min to close" in the startup notice while the banner two
+        # lines above it correctly said 834.
+        segments = {st.instrument.segment for st in self.states.values()}
+        segment = segments.pop() if len(segments) == 1 else None
         self.notifier.send(f"ORBot starting\nmode: {mode_note}\n"
                            f"plans: {', '.join(self.states)}\n"
-                           f"market: {self.calendar.describe()}")
+                           f"market: {self.calendar.describe(segment=segment)}")
 
         await self.warmup()
         await self.adopt_broker_positions()

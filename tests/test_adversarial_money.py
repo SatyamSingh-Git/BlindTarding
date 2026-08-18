@@ -677,3 +677,41 @@ class TestPaperOmsDoesNotShareItsState:
         snapshot = oms.positions()
         snapshot[0].net_qty = 9_999
         assert oms.positions()[0].net_qty == 100
+
+
+class TestUnfinishedBarsNeverReachTheStrategy:
+    """Resampling buckets by wall clock, so the last bucket of a live session
+    holds only the minutes traded so far -- and seeding marks every bar closed.
+    A half-formed 09:00 bar showed a SELL at 09:45 that need not survive to
+    11:00, and the stale-position check would have closed on it."""
+
+    @staticmethod
+    def _bars(last_open_hours_ago):
+        import datetime as dt
+        from orbot.models import Candle
+        now = dt.datetime.now()
+        first = now - dt.timedelta(hours=last_open_hours_ago)
+        return [Candle(ts=first, open=100, high=101, low=99, close=100)]
+
+    def test_a_bucket_still_forming_is_dropped(self):
+        from orbot.engine.history import _drop_unfinished
+        from orbot.engine.timeframe import Timeframe
+        bars = self._bars(1)          # opened an hour ago, 2h bar -> unfinished
+        assert _drop_unfinished(bars, Timeframe.parse("2h")) == []
+
+    def test_a_finished_bucket_is_kept(self):
+        from orbot.engine.history import _drop_unfinished
+        from orbot.engine.timeframe import Timeframe
+        bars = self._bars(3)          # opened three hours ago -> complete
+        assert _drop_unfinished(bars, Timeframe.parse("2h")) == bars
+
+    def test_an_empty_series_is_safe(self):
+        from orbot.engine.history import _drop_unfinished
+        from orbot.engine.timeframe import Timeframe
+        assert _drop_unfinished([], Timeframe.parse("2h")) == []
+
+    def test_daily_bars_are_left_alone(self):
+        from orbot.engine.history import _drop_unfinished
+        from orbot.engine.timeframe import Timeframe
+        bars = self._bars(1)
+        assert _drop_unfinished(bars, Timeframe.parse("1D")) == bars

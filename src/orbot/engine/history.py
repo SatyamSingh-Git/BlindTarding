@@ -27,6 +27,30 @@ log = structlog.get_logger(__name__)
 _CALENDAR_PADDING = 1.55
 
 
+def _drop_unfinished(bars: list[Candle], timeframe: Timeframe) -> list[Candle]:
+    """Discard a trailing bucket whose window has not elapsed.
+
+    Resampling buckets by wall clock, so the last bucket of a live session
+    holds only the minutes traded so far — and seeding marks every bar closed.
+    The strategy then evaluates a bar that has not finished, which is the
+    repainting that `signal_on_bar_close` exists to prevent: at 09:45 a
+    half-formed 09:00 bar showed a SELL that need not survive to 11:00.
+
+    It also collided with live aggregation, which would open its own 09:00 bar
+    from ticks and leave two of them in the series.
+    """
+    if not bars or not timeframe.is_intraday or not timeframe.minutes:
+        return bars
+    last = bars[-1]
+    ends_at = last.ts + dt.timedelta(minutes=timeframe.minutes)
+    now = dt.datetime.now(last.ts.tzinfo) if last.ts.tzinfo else dt.datetime.now()
+    if ends_at > now:
+        log.info("history.dropped_unfinished", bar=last.ts.isoformat(),
+                 closes_at=ends_at.isoformat())
+        return bars[:-1]
+    return bars
+
+
 def fetch_candles(
     client: DhanClient,
     instrument: Instrument,
@@ -48,6 +72,7 @@ def fetch_candles(
     out = resample_to(base, timeframe,
                       session_start=session_start
                       or session_start_for(instrument.segment))
+    out = _drop_unfinished(out, timeframe)
     log.info("history.resampled", timeframe=timeframe.label,
              base_interval=timeframe.base_interval, base_bars=len(base),
              out_bars=len(out))
