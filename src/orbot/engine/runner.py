@@ -198,7 +198,11 @@ class TradingEngine:
         if self.client is None:
             log.warning("engine.no_client", detail="skipping warmup; no data client")
             return
-        for state in self.states.values():
+        for n, state in enumerate(self.states.values()):
+            if n:
+                # Space the calls out. Warming several plans in the same
+                # instant is exactly what trips Angel's rate limiter.
+                await asyncio.sleep(1.5)
             need = state.strategy.params.min_bars
             candles = await asyncio.to_thread(
                 warmup_candles, self.client, state.instrument, state.timeframe, need

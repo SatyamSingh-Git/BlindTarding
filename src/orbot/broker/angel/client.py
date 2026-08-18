@@ -150,7 +150,8 @@ class AngelClient:
 
     # --- transport -------------------------------------------------------
     def _call(self, method: str, path: str, *, json: Any = None,
-              retries: int = 2, order_route: bool = False) -> Any:
+              retries: int = 2, rate_retries: int = 4,
+              order_route: bool = False) -> Any:
         client = self._orders if order_route else self._data
         try:
             headers = self.auth.auth_headers()
@@ -158,7 +159,7 @@ class AngelClient:
             raise DhanAPIError(f"no usable Angel session: {exc}") from exc
 
         last: Exception | None = None
-        for attempt in range(retries + 1):
+        for attempt in range(max(retries, rate_retries) + 1):
             try:
                 resp = client.request(method, path, json=json, headers=headers)
             except httpx.RequestError as exc:
@@ -174,8 +175,13 @@ class AngelClient:
             # where a real authorisation failure comes back as JSON. Retrying
             # the former matters: an unlucky burst during warmup used to kill
             # the engine outright, before it had placed a single order.
-            if (resp.status_code in (403, 429) and attempt < retries
+            if (resp.status_code in (403, 429) and attempt < rate_retries
                     and not _is_json(resp)):
+                # Angel throttles harder than its documented 3/sec suggests,
+                # and startup is the worst moment for it: a login plus one
+                # warmup per plan, back to back. Four attempts spanning ~22s
+                # rides out a throttle window; giving up killed the engine
+                # before it had placed an order.
                 time.sleep(1.5 * (2 ** attempt))
                 continue
             return self._unwrap(resp, method, path)
