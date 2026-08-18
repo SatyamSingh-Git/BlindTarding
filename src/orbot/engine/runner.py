@@ -38,7 +38,7 @@ from ..execution.guards import GuardChain, GuardContext, GuardResult
 from ..execution.oms import OMS
 from ..execution.positions import PositionBook
 from ..execution.resolver import ExecutionResolver, ResolutionError
-from ..models import Action, Candle, Instrument, Signal, Tick
+from ..models import Action, Candle, Instrument, Position, Signal, Tick
 from ..ops.journal import DuplicateSignal, Journal
 from ..ops.killswitch import KillSwitch
 from ..ops.market_calendar import MarketCalendar
@@ -121,6 +121,9 @@ class TradingEngine:
         self.broker_name = ""
         self.supports_correlation_id = True
         self.last_prices: dict[tuple[str, str], float] = {}
+        # Instruments that appeared in the last broker snapshot, so the next one
+        # can explicitly record any that have since gone flat.
+        self._snapshotted: set[tuple[str, str]] = set()
         self._running = False
         self._tasks: list[asyncio.Task] = []
 
@@ -708,7 +711,17 @@ class TradingEngine:
                 local = self.book.get(position.key)
                 if local is not None and position.net_qty == local.net_qty:
                     position.unrealised = local.unrealised
-            self.journal.snapshot_positions(broker, source="broker")
+            # Also record instruments that have gone flat. The broker only
+            # reports what it holds, so a closed position simply stops
+            # appearing -- and a panel that takes the latest row per instrument
+            # then shows it open forever. Gold sat on the dashboard for hours
+            # after the halt had already sold it.
+            live = {p.key for p in broker}
+            closed = [Position(security_id=k[1], segment=ExchangeSegment(k[0]),
+                               net_qty=0, avg_price=0.0)
+                      for k in self._snapshotted - live]
+            self._snapshotted = live
+            self.journal.snapshot_positions(list(broker) + closed, source="broker")
             if not result.matched:
                 self.killswitch.trip(f"position mismatch: {result.detail}")
                 self.notifier.halted(f"POSITION MISMATCH\n{result.detail}\n\n"
