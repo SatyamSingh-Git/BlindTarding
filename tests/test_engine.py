@@ -127,7 +127,7 @@ def engine(tmp_path, registry):
                         feed_staleness_seconds=60, signal_staleness_seconds=120),
         registry=registry,
         client=PricedClient(),
-        oms=PaperOMS(starting_funds=500_000.0, slippage_pct=0.0),
+        oms=PaperOMS(starting_funds=500_000.0, slippage_pct=0.0, slippage_ticks=0),
         journal=journal,
         notifier=notifier,
         killswitch=KillSwitch(tmp_path / "HALT"),

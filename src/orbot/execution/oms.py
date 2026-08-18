@@ -113,11 +113,13 @@ class PaperOMS(OMS):
 
     def __init__(self, *, starting_funds: float = 1_000_000.0,
                  slippage_pct: float = 0.05,
+                 slippage_ticks: float | None = 1.0,
                  margin_pct: float = 0.11,
                  state_path: Path | None = None) -> None:
         self.funds = starting_funds
         self.starting_funds = starting_funds
         self.slippage_pct = slippage_pct
+        self.slippage_ticks = slippage_ticks
         # Futures and options are margin products: buying one blocks a fraction
         # of the contract value, it does not cost the contract value. Charging
         # the full notional drove paper funds to minus Rs 1.5 crore on a
@@ -144,10 +146,19 @@ class PaperOMS(OMS):
                 f"paper fill needs a reference price for {intent.instrument.display_name}"
             )
 
-        drift = self.slippage_pct / 100.0
-        fill = price * (1 + drift if intent.transaction_type is TransactionType.BUY
-                        else 1 - drift)
-        fill = round(fill / intent.instrument.tick_size) * intent.instrument.tick_size
+        # Slippage in ticks where configured, because that is how it behaves:
+        # you cross the spread and lose a tick or two. As a percentage it scales
+        # with price, so 0.05% cost GOLDM 77 ticks and SILVER100 one -- the same
+        # setting, two orders of magnitude apart, for no reason but the size of
+        # the number the contract happens to be quoted in.
+        tick = intent.instrument.tick_size or 0.05
+        if self.slippage_ticks is not None:
+            offset = self.slippage_ticks * tick
+        else:
+            offset = price * (self.slippage_pct / 100.0)
+        fill = (price + offset if intent.transaction_type is TransactionType.BUY
+                else price - offset)
+        fill = round(fill / tick) * tick
 
         order = Order(
             order_id=f"PAPER-{uuid.uuid4().hex[:10]}",
@@ -357,13 +368,14 @@ class LiveOMS(OMS):
 def build_oms(mode: str, client: DhanClient | None, *,
               starting_funds: float = 1_000_000.0,
               slippage_pct: float = 0.05,
+              slippage_ticks: float | None = 1.0,
               state_path: Path | None = None) -> OMS:
     if mode == "live":
         if client is None:
             raise ValueError("live mode requires a Dhan client")
         return LiveOMS(client)
     return PaperOMS(starting_funds=starting_funds, slippage_pct=slippage_pct,
-                    state_path=state_path)
+                    slippage_ticks=slippage_ticks, state_path=state_path)
 
 
 __all__ = ["OMS", "PaperOMS", "LiveOMS", "build_oms"]

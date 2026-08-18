@@ -23,6 +23,8 @@ subscribed, not from the packet — guessing would mislabel every index tick.
 from __future__ import annotations
 
 import asyncio
+import random
+import time
 import datetime as dt
 import json
 import struct
@@ -61,6 +63,14 @@ _HEADER = struct.Struct("<BB25sqq")      # mode, exchange, token, seq, ts  = 43 
 _LTP = struct.Struct("<q")               # 43-51
 _QUOTE_TAIL = struct.Struct("<qqqddqqqq")  # 51-123
 _MAX_TOKENS_PER_MESSAGE = 1000
+
+
+# A connection has to survive this long before it counts as healthy enough to
+# reset the reconnect backoff.
+STABLE_SECONDS = 60.0
+# Where the backoff starts once Angel has answered with 429. Retrying faster is
+# what earned the 429 in the first place.
+THROTTLED_BACKOFF = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +181,7 @@ class AngelFeed:
         *,
         mode: int = MODE_QUOTE,
         on_tick: TickHandler | None = None,
-        max_backoff: float = 30.0,
+        max_backoff: float = 120.0,
     ) -> None:
         self.auth = auth
         self.mode = mode
@@ -236,6 +246,7 @@ class AngelFeed:
         self._running = True
         backoff = 1.0
         while self._running:
+            connected_at: float | None = None
             try:
                 headers = {
                     "Authorization": self.auth.jwt(),
@@ -250,7 +261,7 @@ class AngelFeed:
                     self._ws = ws
                     log.info("angel_feed.connected", instruments=len(self._subs))
                     await self._subscribe(ws)
-                    backoff = 1.0
+                    connected_at = time.monotonic()
                     heartbeat = asyncio.create_task(self._heartbeat(ws))
                     try:
                         await self._read_loop(ws)
@@ -261,9 +272,28 @@ class AngelFeed:
             except Exception as exc:
                 if not self._running:
                     break
-                log.warning("angel_feed.disconnected", error=str(exc)[:200],
-                            retry_in=round(backoff, 1))
-                await asyncio.sleep(backoff)
+                # Reset the backoff only for a connection that actually held.
+                # Resetting on *connect* meant a socket that died a second later
+                # retried at 1s forever, and Angel answered a day of that with
+                # HTTP 429 -- so the reconnect storm became the outage.
+                lived = (time.monotonic() - connected_at) if connected_at else 0.0
+                if lived >= STABLE_SECONDS:
+                    backoff = 1.0
+
+                text = str(exc)
+                throttled = "429" in text or "too many" in text.lower()
+                if throttled:
+                    # Being rate limited is not a transient blip: retrying
+                    # sooner is what caused it. Start well past the usual floor.
+                    backoff = max(backoff, THROTTLED_BACKOFF)
+
+                # Jitter, so a restart storm across plans does not resynchronise
+                # into a thundering herd on the same second.
+                wait = backoff * (0.7 + random.random() * 0.6)
+                log.warning("angel_feed.disconnected", error=text[:200],
+                            retry_in=round(wait, 1), lived_for=round(lived, 1),
+                            throttled=throttled)
+                await asyncio.sleep(wait)
                 backoff = min(backoff * 2, self.max_backoff)
             finally:
                 self._ws = None

@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     # position sizing behave the way they will with real capital.
     paper_capital: float = 200_000.0
     paper_slippage_pct: float = 0.05
+    # Slippage as a count of ticks, which is how it actually behaves. The
+    # percentage above is wrong for anything whose price is large relative to
+    # its tick: 0.05% of GOLDM at 153,000 is 77 ticks, on a liquid contract
+    # that fills within one or two. It charged Rs 770 a side and turned a
+    # +Rs 2,130 day into +Rs 190. Ticks win where both are set.
+    paper_slippage_ticks: float = 1.0
     log_level: str = "INFO"
 
     # Local safety caps, deliberately far below Dhan's 25/sec and 7000/day.

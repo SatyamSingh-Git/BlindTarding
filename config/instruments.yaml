@@ -157,7 +157,13 @@ plans:
       quantity: 100             # 1 lot = Rs 10 per point
     risk:
       sl_points: 2000
-      max_trades_per_day: 4
+      # An MCX day holds eight 2-hour bars, and the indicator can fire on any
+      # of them -- so eight signals means up to eight orders, all legitimate.
+      # The old cap of 4 was sized for a 5-minute NIFTY plan and blocked a real
+      # silver signal at 17:00 on 18 Aug. This is a runaway guard, not a
+      # position limit: 10 leaves headroom for a normal day while still
+      # catching a loop that tries to trade fifty times.
+      max_trades_per_day: 10
       square_off_time: null
 
   # --- MCX SILVER100 futures, 2-hour ---------------------------------------
@@ -208,5 +214,6 @@ plans:
     risk:
       sl_points: 50
       target_points: 250
-      max_trades_per_day: 4
+      # See goldm-2h: eight bars a day, so eight signals is possible and legal.
+      max_trades_per_day: 10
       square_off_time: null

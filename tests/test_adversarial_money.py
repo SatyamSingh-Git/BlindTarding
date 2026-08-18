@@ -114,7 +114,7 @@ class TestPaperFundsInvariants:
     @staticmethod
     def _oms():
         from orbot.execution.oms import PaperOMS
-        return PaperOMS(starting_funds=300_000.0, slippage_pct=0.0)
+        return PaperOMS(starting_funds=300_000.0, slippage_pct=0.0, slippage_ticks=0)
 
     def test_funds_never_go_negative_on_an_affordable_trade(self):
         oms = self._oms()
@@ -376,12 +376,12 @@ class TestPaperPositionsSurviveRestart:
         from orbot.execution.oms import PaperOMS
         path = tmp_path / "paper.json"
 
-        one = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0,
+        one = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0, slippage_ticks=0,
                        state_path=path)
         one.place(intent(GOLDM, 100), reference_price=153_327.0)
         funds, positions = one.available_funds(), one.positions()
 
-        two = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0,
+        two = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0, slippage_ticks=0,
                        state_path=path)
         assert [(p.security_id, p.net_qty, p.avg_price) for p in two.positions()] \
             == [(p.security_id, p.net_qty, p.avg_price) for p in positions]
@@ -391,11 +391,11 @@ class TestPaperPositionsSurviveRestart:
         from orbot.constants import TransactionType
         from orbot.execution.oms import PaperOMS
         path = tmp_path / "paper.json"
-        one = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0, state_path=path)
+        one = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0, slippage_ticks=0, state_path=path)
         one.place(intent(GOLDM, 100), reference_price=150_000.0)
         one.place(intent(GOLDM, 100, TransactionType.SELL),
                   reference_price=150_500.0)
-        two = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0, state_path=path)
+        two = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0, slippage_ticks=0, state_path=path)
         assert two.positions() == []
 
     def test_corrupt_state_is_ignored_not_fatal(self, tmp_path):
@@ -653,7 +653,7 @@ class TestPaperOmsDoesNotShareItsState:
     def _oms_and_book():
         from orbot.execution.oms import PaperOMS
         from orbot.execution.positions import PositionBook
-        oms = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0)
+        oms = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0, slippage_ticks=0)
         oms.place(intent(GOLDM, 100), reference_price=153_327.0)
         book = PositionBook()
         book.adopt(oms.positions(), multiplier_for=lambda k: 0.1)
@@ -715,3 +715,113 @@ class TestUnfinishedBarsNeverReachTheStrategy:
         from orbot.engine.timeframe import Timeframe
         bars = self._bars(1)
         assert _drop_unfinished(bars, Timeframe.parse("1D")) == bars
+
+
+class TestSlippageIsMeasuredInTicks:
+    """As a percentage, slippage scales with the price a contract happens to be
+    quoted in: 0.05% cost GOLDM 77 ticks and SILVER100 one. The same setting,
+    two orders of magnitude apart, for no reason at all."""
+
+    @staticmethod
+    def _fill(symbol, price, tick, side, ticks=1.0):
+        from orbot.constants import OrderType, ProductType, TransactionType
+        from orbot.execution.oms import PaperOMS
+        inst = Instrument(security_id="1", segment=ExchangeSegment.MCX_COMM,
+                          symbol=symbol, display_name=symbol,
+                          instrument_type=InstrumentType.FUTCOM, lot_size=100,
+                          tick_size=tick)
+        oms = PaperOMS(starting_funds=1e7, slippage_ticks=ticks)
+        order = oms.place(OrderIntent(instrument=inst, transaction_type=side,
+                                      quantity=100, order_type=OrderType.MARKET,
+                                      product_type=ProductType.MARGIN, plan="p"),
+                          reference_price=price)
+        return order.avg_price
+
+    def test_gold_slips_one_tick_not_seventy_seven(self):
+        from orbot.constants import TransactionType
+        got = self._fill("GOLDM", 153_250.0, 1.0, TransactionType.BUY)
+        assert got == pytest.approx(153_251.0)
+
+    def test_silver_slips_the_same_one_tick(self):
+        from orbot.constants import TransactionType
+        got = self._fill("SILVER100", 2_377.0, 1.0, TransactionType.BUY)
+        assert got == pytest.approx(2_378.0)
+
+    def test_a_sell_slips_against_you_too(self):
+        from orbot.constants import TransactionType
+        got = self._fill("GOLDM", 153_863.0, 1.0, TransactionType.SELL)
+        assert got == pytest.approx(153_862.0)
+
+    def test_zero_ticks_means_a_frictionless_fill(self):
+        from orbot.constants import TransactionType
+        assert self._fill("GOLDM", 153_250.0, 1.0, TransactionType.BUY,
+                          ticks=0) == pytest.approx(153_250.0)
+
+    def test_a_round_trip_costs_two_ticks_whatever_the_price(self):
+        """The point of the change: cost no longer depends on price size."""
+        from orbot.constants import TransactionType
+        for symbol, price, tick in (("GOLDM", 153_250.0, 1.0),
+                                    ("SILVER100", 2_377.0, 1.0)):
+            buy = self._fill(symbol, price, tick, TransactionType.BUY)
+            sell = self._fill(symbol, price, tick, TransactionType.SELL)
+            assert (buy - sell) == pytest.approx(2 * tick)
+
+
+class TestReconnectDoesNotEarnA429:
+    """Angel answered a day of 1-second retries with HTTP 429, so the reconnect
+    storm became the outage."""
+
+    @staticmethod
+    def _feed():
+        from orbot.broker.angel.auth import AngelAuth
+        from orbot.broker.angel.feed import AngelFeed
+        return AngelFeed(AngelAuth("C1", "key"))
+
+    def test_backoff_is_capped_well_above_the_old_thirty_seconds(self):
+        assert self._feed().max_backoff >= 120.0
+
+    def test_a_throttle_backoff_exists_and_is_not_a_second(self):
+        from orbot.broker.angel.feed import THROTTLED_BACKOFF
+        assert THROTTLED_BACKOFF >= 30.0
+
+    def test_a_connection_must_hold_before_it_counts_as_healthy(self):
+        from orbot.broker.angel.feed import STABLE_SECONDS
+        assert STABLE_SECONDS >= 30.0
+
+    def test_the_reset_is_gated_on_lifetime_not_on_connecting(self):
+        """The precise bug: `backoff = 1.0` used to sit next to the connect log,
+        so a socket that died a second later retried at 1s forever."""
+        import inspect
+        from orbot.broker.angel.feed import AngelFeed
+        src = inspect.getsource(AngelFeed.run)
+        assert "STABLE_SECONDS" in src
+        connect_line = src.index("angel_feed.connected")
+        after = src[connect_line:connect_line + 400]
+        assert "backoff = 1.0" not in after, (
+            "backoff still resets merely on connecting")
+
+
+class TestTradeCapFitsTheTimeframe:
+    """An MCX day holds eight 2-hour bars, so eight signals is legitimate. A cap
+    of 4 blocked a real silver signal at 17:00 on 18 August."""
+
+    def test_the_live_plans_allow_a_full_day_of_bars(self):
+        from orbot.config import load_plans
+        for plan in load_plans():
+            if not plan.enabled:
+                continue
+            bars_per_day = 8 if plan.signal.timeframe == "2h" else None
+            if bars_per_day:
+                assert plan.risk.max_trades_per_day >= bars_per_day, (
+                    f"{plan.name} caps at {plan.risk.max_trades_per_day} but a "
+                    f"day can legitimately produce {bars_per_day} signals")
+
+    def test_the_cap_still_catches_a_runaway(self, chain):
+        from orbot.config import PlanRisk, SignalConfig, TradePlan
+        from orbot.execution.guards import GuardContext
+        plan = TradePlan(name="p", signal=SignalConfig(
+            exchange_segment=ExchangeSegment.MCX_COMM, security_id="1",
+            instrument_type=InstrumentType.FUTCOM, timeframe="2h"),
+            risk=PlanRisk(max_trades_per_day=10))
+        ctx = GuardContext(now=dt.datetime.now(), plan=plan, trades_today=10)
+        assert not chain._trades_today(ctx).allowed

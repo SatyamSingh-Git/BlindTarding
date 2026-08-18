@@ -460,21 +460,21 @@ class TestPaperOMS:
             oms.place(intent_for(TransactionType.BUY, 65))
 
     def test_funds_decrease_on_a_buy_and_recover_on_a_sell(self):
-        oms = PaperOMS(starting_funds=100_000.0, slippage_pct=0.0)
+        oms = PaperOMS(starting_funds=100_000.0, slippage_pct=0.0, slippage_ticks=0)
         oms.place(intent_for(TransactionType.BUY, 65), reference_price=100.0)
         assert oms.available_funds() == pytest.approx(100_000 - 6_500)
         oms.place(intent_for(TransactionType.SELL, 65), reference_price=100.0)
         assert oms.available_funds() == pytest.approx(100_000)
 
     def test_positions_track_and_flatten(self):
-        oms = PaperOMS(slippage_pct=0.0)
+        oms = PaperOMS(slippage_pct=0.0, slippage_ticks=0)
         oms.place(intent_for(TransactionType.BUY, 65), reference_price=100.0)
         assert len(oms.positions()) == 1
         oms.place(intent_for(TransactionType.SELL, 65), reference_price=120.0)
         assert oms.positions() == []
 
     def test_realised_pnl_is_recorded_on_the_round_trip(self):
-        oms = PaperOMS(slippage_pct=0.0)
+        oms = PaperOMS(slippage_pct=0.0, slippage_ticks=0)
         oms.place(intent_for(TransactionType.BUY, 65), reference_price=100.0)
         oms.place(intent_for(TransactionType.SELL, 65), reference_price=120.0)
         assert oms._positions[OPT.key].realised == pytest.approx(65 * 20)
@@ -506,7 +506,7 @@ class TestPaperFundsByProduct:
         from orbot.constants import TransactionType
         from orbot.execution.oms import PaperOMS
 
-        oms = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0,
+        oms = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0, slippage_ticks=0,
                        margin_pct=0.11)
         oms.place(self._future_intent(TransactionType.BUY, 100),
                   reference_price=153_327.0)
@@ -520,7 +520,7 @@ class TestPaperFundsByProduct:
         from orbot.constants import TransactionType
         from orbot.execution.oms import PaperOMS
 
-        oms = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0)
+        oms = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0, slippage_ticks=0)
         oms.place(self._future_intent(TransactionType.BUY, 100),
                   reference_price=150_000.0)
         oms.place(self._future_intent(TransactionType.SELL, 100),

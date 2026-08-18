@@ -897,6 +897,7 @@ def _build_context(mode: str | None = None):
     oms = build_oms(settings.trade_mode, client,
                     starting_funds=settings.paper_capital,
                     slippage_pct=settings.paper_slippage_pct,
+                    slippage_ticks=settings.paper_slippage_ticks,
                     state_path=settings.paper_state_path)
     engine = TradingEngine(
         settings=settings, plans=plans_cfg, risk=risk, registry=registry,
