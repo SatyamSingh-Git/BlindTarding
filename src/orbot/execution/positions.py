@@ -13,7 +13,7 @@ it as sent, or an auto square-off by the broker near the close.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import structlog
 
@@ -200,7 +200,10 @@ class PositionBook:
         unknown and mark() falls back to 1. That read a Rs 6,180 loss on gold
         as Rs 65,900.
         """
-        self._positions = {p.key: p for p in broker_positions if p.net_qty != 0}
+        # Copy on the way in. The book must own what it holds: adopting a
+        # caller's objects lets whoever owns them mutate the book from outside.
+        self._positions = {p.key: replace(p) for p in broker_positions
+                           if p.net_qty != 0}
         if multiplier_for is not None:
             for key in self._positions:
                 self._multipliers[key] = multiplier_for(key)

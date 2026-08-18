@@ -642,3 +642,38 @@ class TestExitsMissedWhileStopped:
                        low=1, close=1)] * 140
         with patched:
             assert strat.open_position_entry(bars) is None
+
+
+class TestPaperOmsDoesNotShareItsState:
+    """A live client parses fresh objects out of JSON. The simulator handing
+    out its own let the book alias OMS state, so one fill was applied twice --
+    turning a closed long into a phantom short."""
+
+    @staticmethod
+    def _oms_and_book():
+        from orbot.execution.oms import PaperOMS
+        from orbot.execution.positions import PositionBook
+        oms = PaperOMS(starting_funds=300_000.0, slippage_pct=0.0)
+        oms.place(intent(GOLDM, 100), reference_price=153_327.0)
+        book = PositionBook()
+        book.adopt(oms.positions(), multiplier_for=lambda k: 0.1)
+        return oms, book
+
+    def test_positions_are_copies(self):
+        oms, book = self._oms_and_book()
+        assert book.get(GOLDM.key) is not oms.positions()[0]
+
+    def test_a_full_close_leaves_the_book_flat_not_short(self):
+        from orbot.constants import TransactionType
+        oms, book = self._oms_and_book()
+        order = oms.place(intent(GOLDM, 100, TransactionType.SELL),
+                          reference_price=153_644.0)
+        book.apply_fill(intent(GOLDM, 100, TransactionType.SELL), order)
+        assert book.get(GOLDM.key).net_qty == 0, "closed long became a short"
+        assert oms.positions() == []
+
+    def test_mutating_a_returned_position_cannot_reach_the_oms(self):
+        oms, _ = self._oms_and_book()
+        snapshot = oms.positions()
+        snapshot[0].net_qty = 9_999
+        assert oms.positions()[0].net_qty == 100

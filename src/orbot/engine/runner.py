@@ -297,7 +297,7 @@ class TradingEngine:
             self.notifier.send(
                 f"{state.name}: the strategy exited while the bot was stopped, "
                 f"but the position is still open. Closing it now.")
-            await self.flatten(f"{state.name}: exit missed while stopped")
+            await self.close_plan(state, "exit missed while stopped")
 
         for state in self.states.values():
             if not (state.plan.strategy.adopt_open_signal and state.is_flat):
@@ -618,6 +618,39 @@ class TradingEngine:
         self.notifier.halted(f"{verdict.guard}\n{verdict.detail}")
         if verdict.flatten:
             await self.flatten("guard halt")
+
+    async def close_plan(self, state: PlanState, reason: str) -> None:
+        """Close one plan's position, leaving every other plan alone.
+
+        flatten() is the emergency lever: a halt or a breached loss cap means
+        stop everything. Reaching for it to close a single stale position
+        closed the other plan too, whose own strategy was still long and had
+        given no exit at all.
+        """
+        if state.position_key is None:
+            return
+        position = self.book.get(state.position_key)
+        if position is None or position.net_qty == 0:
+            state.position_key = None
+            return
+        log.warning("engine.close_plan", plan=state.name, reason=reason,
+                    qty=position.net_qty)
+        try:
+            intent = state.resolver.resolve_exit(position)
+            reference = self.last_prices.get(position.key)
+            order = await asyncio.to_thread(self.oms.place, intent,
+                                            reference_price=reference)
+            order = await asyncio.to_thread(self.oms.settle, order)
+            self.journal.record_order(intent, order, mode=self.oms.mode)
+            if order.filled_qty > 0:
+                self.book.apply_fill(intent, order)
+                state.position_key = None
+                state.bracket_fired = False
+                state.bracket_ref_price = None
+        except Exception as exc:
+            log.exception("engine.close_plan_failed", plan=state.name)
+            self.notifier.error("could not close position",
+                                f"{state.name}: {exc}")
 
     async def flatten(self, reason: str) -> None:
         """Close every open position. Used by halts and by square-off."""

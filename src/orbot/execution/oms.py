@@ -38,6 +38,7 @@ import structlog
 from ..broker.dhan_client import DhanAPIError, DhanClient, OrderStateUnknown
 from pathlib import Path
 import json
+from dataclasses import replace
 
 from ..constants import (IST, ExchangeSegment, OPTION_TYPES, InstrumentType, OrderStatus,
                          OrderType, TransactionType)
@@ -241,7 +242,12 @@ class PaperOMS(OMS):
             stored.status = OrderStatus.CANCELLED
 
     def positions(self) -> list[Position]:
-        return [p for p in self._positions.values() if p.net_qty != 0]
+        # Copies, deliberately. A live client parses fresh objects out of JSON;
+        # handing out our own would let a caller's book alias our state, so the
+        # OMS mutating a position on fill would silently apply that fill to the
+        # book as well -- and the book's own apply_fill would then apply it a
+        # second time, turning a closed long into a phantom short.
+        return [replace(p) for p in self._positions.values() if p.net_qty != 0]
 
     def available_funds(self) -> float | None:
         return self.funds
