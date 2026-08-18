@@ -951,3 +951,81 @@ class TestLossyBarsAreNotTraded:
         feed._last_disconnect_at = bar_open - dt.timedelta(minutes=5)
         assert not feed.dropped_since(bar_open), (
             "a drop before the bar opened is not this bar's problem")
+
+
+class TestContractRolling:
+    """A pinned id never rolls. The day it expires the token is dead: no data
+    comes back, no order goes out, and the plan goes quiet with nothing
+    anywhere to say why. Gold expires 4 Sep, silver 31 Aug."""
+
+    def test_both_live_plans_roll(self):
+        from orbot.config import load_plans
+        for plan in load_plans():
+            if plan.enabled:
+                assert plan.signal.roll == "front", (
+                    f"{plan.name} pins one contract and will die at its expiry")
+
+    def test_the_default_is_to_pin(self):
+        """Rolling changes which instrument is traded, so it is opt-in."""
+        from orbot.config import SignalConfig
+        cfg = SignalConfig(exchange_segment=ExchangeSegment.MCX_COMM,
+                           security_id="1", instrument_type=InstrumentType.FUTCOM)
+        assert cfg.roll == "none"
+
+    def test_a_roll_resolves_the_nearest_expiry(self):
+        """The whole point: after the pinned contract dies, resolution moves on."""
+        import datetime as dt
+        from unittest.mock import MagicMock
+        from orbot.config import (ExecutionConfig, SignalConfig, StrategyConfig,
+                                  TradePlan)
+        from orbot.engine.runner import TradingEngine
+
+        dead = Instrument(security_id="563946", segment=ExchangeSegment.MCX_COMM,
+                          symbol="GOLDM", display_name="GOLDM04SEP26FUT",
+                          instrument_type=InstrumentType.FUTCOM, lot_size=100,
+                          expiry=dt.date(2026, 9, 4))
+        live = Instrument(security_id="569003", segment=ExchangeSegment.MCX_COMM,
+                          symbol="GOLDM", display_name="GOLDM05OCT26FUT",
+                          instrument_type=InstrumentType.FUTCOM, lot_size=100,
+                          expiry=dt.date(2026, 10, 5))
+        plan = TradePlan(
+            name="goldm-2h",
+            signal=SignalConfig(exchange_segment=ExchangeSegment.MCX_COMM,
+                                security_id="563946",
+                                instrument_type=InstrumentType.FUTCOM,
+                                timeframe="2h", roll="front"),
+            strategy=StrategyConfig(),
+            execution=ExecutionConfig(mode="same", underlying="GOLDM",
+                                      quantity=100))
+        eng = MagicMock()
+        eng.registry.get.return_value = dead
+        eng.registry.select_expiry.return_value = dt.date(2026, 10, 5)
+        eng.registry.future.return_value = live
+        got = TradingEngine._resolve_signal_instrument(eng, plan)
+        assert got.security_id == "569003"
+        assert eng.notifier.send.called, "a roll must be announced, not silent"
+
+    def test_a_failed_roll_keeps_the_configured_contract(self):
+        """Fail soft here: a resolution error must not stop the plan loading."""
+        from unittest.mock import MagicMock
+        from orbot.config import (ExecutionConfig, SignalConfig, StrategyConfig,
+                                  TradePlan)
+        from orbot.engine.runner import TradingEngine
+        pinned = Instrument(security_id="563946",
+                            segment=ExchangeSegment.MCX_COMM, symbol="GOLDM",
+                            display_name="GOLDM04SEP26FUT",
+                            instrument_type=InstrumentType.FUTCOM, lot_size=100)
+        plan = TradePlan(
+            name="p",
+            signal=SignalConfig(exchange_segment=ExchangeSegment.MCX_COMM,
+                                security_id="563946",
+                                instrument_type=InstrumentType.FUTCOM,
+                                timeframe="2h", roll="front"),
+            strategy=StrategyConfig(),
+            execution=ExecutionConfig(mode="same", underlying="GOLDM",
+                                      quantity=100))
+        eng = MagicMock()
+        eng.registry.get.return_value = pinned
+        eng.registry.select_expiry.side_effect = RuntimeError("no expiries")
+        got = TradingEngine._resolve_signal_instrument(eng, plan)
+        assert got.security_id == "563946"

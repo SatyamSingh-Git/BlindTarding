@@ -130,6 +130,13 @@ plans:
       security_id: "563946"      # GOLDM 04SEP2026 FUT (Angel token)
       instrument_type: FUTCOM
       timeframe: 2h
+      # Pick the front month fresh at startup. The id above is the fallback and
+      # the record of what was last chosen; without this the plan points at one
+      # contract forever and goes silently dead the day it expires -- 4 Sep for
+      # this one. Rolling happens only between runs, never mid-position: two
+      # contract months trade at different prices, and splicing them inside a
+      # live trade would corrupt the indicator and the P&L together.
+      roll: front
     strategy:
       preset: svmkr_ut_hma_orb
       signal_on_bar_close: true
@@ -186,6 +193,8 @@ plans:
       security_id: "574823"      # SILVER100 31AUG2026 FUT (Angel token)
       instrument_type: FUTCOM
       timeframe: 2h
+      # See goldm-2h. This one expires 31 Aug, sooner than gold.
+      roll: front
     strategy:
       preset: svmkr_ut_hma_orb
       signal_on_bar_close: true

@@ -133,8 +133,7 @@ class TradingEngine:
 
     # --- setup -----------------------------------------------------------
     def _build_state(self, plan: TradePlan) -> PlanState:
-        instrument = self.registry.get(plan.signal.exchange_segment,
-                                       plan.signal.security_id)
+        instrument = self._resolve_signal_instrument(plan)
         timeframe = plan.signal.tf
         if not timeframe.is_intraday:
             raise ValueError(
@@ -151,6 +150,40 @@ class TradingEngine:
             strategy=SvmkrUtHmaOrb(params, plan=plan.name),
             resolver=ExecutionResolver(self.registry, plan),
         )
+
+    def _resolve_signal_instrument(self, plan: TradePlan) -> Instrument:
+        """Which contract this plan watches, rolling if it is configured to.
+
+        With roll: front the front month is picked fresh at startup, so a plan
+        keeps working across an expiry instead of pointing at a dead token. The
+        roll only ever happens between runs -- never mid-position, because two
+        contract months trade at different prices and splicing them inside a
+        live trade would corrupt both the indicator and the P&L.
+        """
+        pinned = self.registry.get(plan.signal.exchange_segment,
+                                   plan.signal.security_id)
+        if plan.signal.roll != "front":
+            return pinned
+        underlying = plan.execution.underlying or pinned.symbol
+        try:
+            expiry = self.registry.select_expiry(
+                underlying, pinned.instrument_type, "nearest")
+            front = self.registry.future(underlying, expiry,
+                                         instrument_type=pinned.instrument_type)
+        except Exception as exc:
+            log.error("engine.roll_failed", plan=plan.name, error=str(exc)[:160],
+                      detail="keeping the configured contract")
+            return pinned
+        if front.security_id != pinned.security_id:
+            log.warning("engine.rolled", plan=plan.name,
+                        was=pinned.display_name, now=front.display_name,
+                        expiry=str(front.expiry))
+            self.notifier.send(
+                f"{plan.name}: rolled from {pinned.display_name} to "
+                f"{front.display_name} (expires {front.expiry:%d %b %Y}).\n"
+                f"Update config/instruments.yaml to security_id "
+                f"{front.security_id} so this is explicit rather than implied.")
+        return front
 
     def validate(self) -> list[str]:
         """Static checks across every enabled plan, run before the market opens."""

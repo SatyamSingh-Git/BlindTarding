@@ -146,6 +146,12 @@ class SignalConfig(BaseModel):
     # rather than halfway through a trading session.
     timeframe: str = "5m"
 
+    # "auto" resolves the front-month contract at startup instead of pinning
+    # one id forever. A pinned id never rolls: the day it expires the token is
+    # dead, no data comes back, no order goes out, and the plan simply goes
+    # quiet with nothing anywhere to say why.
+    roll: Literal["none", "front"] = "none"
+
     @field_validator("security_id", mode="before")
     @classmethod
     def _stringify(cls, v: Any) -> str:
