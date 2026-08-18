@@ -107,6 +107,21 @@ class CandleSeries:
         self._bar_start_volume = None
         return count
 
+    def replace_last(self, candle: Candle) -> bool:
+        """Swap the most recent closed bar for an authoritative version.
+
+        Used when the feed dropped mid-bar: the aggregated bar looks whole but
+        its high and low are truncated, and every indicator downstream is
+        computed from that range. Only the last bar can be replaced, and only
+        by one carrying the same timestamp -- rewriting history further back
+        would silently change signals already acted on.
+        """
+        if not self.bars or self.bars[-1].ts != candle.ts:
+            return False
+        candle.closed = True
+        self.bars[-1] = candle
+        return True
+
     # --- live aggregation -----------------------------------------------
     def on_tick(self, tick: Tick) -> Candle | None:
         """Fold a tick in. Returns the previous bar if this tick closed it."""

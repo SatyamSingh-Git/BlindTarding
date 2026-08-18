@@ -192,6 +192,12 @@ class AngelFeed:
         self._running = False
         self._last_tick_at: dt.datetime | None = None
         self.ticks_received = 0
+        # When the socket last went down. A bar built while the feed was
+        # dropping is missing ticks, and a missing high or low gives a wrong
+        # ATR, a wrong stop, and a crossing that never happened -- four such
+        # phantom signals cost Rs 14,090 on 18 August.
+        self._last_disconnect_at: dt.datetime | None = None
+        self.disconnects = 0
 
     # --- subscriptions ---------------------------------------------------
     def add(self, instruments: Iterable[AngelFeedInstrument]) -> None:
@@ -235,6 +241,16 @@ class AngelFeed:
     @property
     def last_tick_at(self) -> dt.datetime | None:
         return self._last_tick_at
+
+    @property
+    def last_disconnect_at(self) -> dt.datetime | None:
+        return self._last_disconnect_at
+
+    def dropped_since(self, when: dt.datetime) -> bool:
+        """Did the connection go down at any point since `when`?"""
+        if self._last_disconnect_at is None:
+            return False
+        return self._last_disconnect_at >= when
 
     def seconds_since_last_tick(self) -> float | None:
         if self._last_tick_at is None:
@@ -290,6 +306,8 @@ class AngelFeed:
                 # Jitter, so a restart storm across plans does not resynchronise
                 # into a thundering herd on the same second.
                 wait = backoff * (0.7 + random.random() * 0.6)
+                self._last_disconnect_at = dt.datetime.now(IST_TZ)
+                self.disconnects += 1
                 log.warning("angel_feed.disconnected", error=text[:200],
                             retry_in=round(wait, 1), lived_for=round(lived, 1),
                             throttled=throttled)

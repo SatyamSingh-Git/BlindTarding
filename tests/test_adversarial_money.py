@@ -904,3 +904,50 @@ class TestRealisedPnlSurvivesARestart:
         import datetime as dt
         from orbot.execution.oms import LiveOMS
         assert LiveOMS.realised_on(object(), dt.date.today()) == 0.0
+
+
+class TestLossyBarsAreNotTraded:
+    """A bar aggregated through a dropped socket looks whole: plausible close,
+    truncated high and low. ATR comes from that range, the stop from that ATR,
+    and a crossing appears the exchange never printed. Four such phantom
+    signals cost Rs 14,090 on 18 August, and the staleness guard cannot see it
+    -- that catches a feed delivering nothing, not one delivering most."""
+
+    @staticmethod
+    def _bar(hour, high, low, close):
+        from orbot.models import Candle
+        return Candle(ts=dt.datetime(2026, 8, 18, hour, 0), open=close,
+                      high=high, low=low, close=close, volume=1, closed=True)
+
+    def test_replace_last_swaps_the_bar(self):
+        from orbot.engine.candles import CandleSeries
+        series = CandleSeries(120)
+        series.seed([self._bar(9, 154_140, 153_622, 153_863)])
+        good = self._bar(9, 154_250, 153_500, 153_863)
+        assert series.replace_last(good)
+        assert series.bars[-1].high == 154_250
+        assert series.bars[-1].low == 153_500
+
+    def test_it_refuses_to_rewrite_a_different_bar(self):
+        """Rewriting history further back would change signals already acted on."""
+        from orbot.engine.candles import CandleSeries
+        series = CandleSeries(120)
+        series.seed([self._bar(9, 154_140, 153_622, 153_863)])
+        assert not series.replace_last(self._bar(11, 1, 1, 1))
+        assert series.bars[-1].ts.hour == 9
+
+    def test_it_refuses_on_an_empty_series(self):
+        from orbot.engine.candles import CandleSeries
+        assert not CandleSeries(120).replace_last(self._bar(9, 1, 1, 1))
+
+    def test_the_feed_reports_a_drop_inside_a_bar(self):
+        from orbot.broker.angel.auth import AngelAuth
+        from orbot.broker.angel.feed import AngelFeed
+        feed = AngelFeed(AngelAuth("C1", "key"))
+        bar_open = dt.datetime.now(feed._tz if hasattr(feed, "_tz") else None)
+        assert not feed.dropped_since(bar_open), "a fresh feed has not dropped"
+        feed._last_disconnect_at = bar_open + dt.timedelta(minutes=5)
+        assert feed.dropped_since(bar_open)
+        feed._last_disconnect_at = bar_open - dt.timedelta(minutes=5)
+        assert not feed.dropped_since(bar_open), (
+            "a drop before the bar opened is not this bar's problem")

@@ -44,7 +44,7 @@ from ..ops.killswitch import KillSwitch
 from ..ops.market_calendar import MarketCalendar
 from ..ops.notifier import Notifier
 from .candles import CandleSeries, session_start_for
-from .history import warmup_candles
+from .history import fetch_candles, warmup_candles
 from .strategy import SvmkrUtHmaOrb, params_from_config
 from .timeframe import Timeframe
 
@@ -444,6 +444,8 @@ class TradingEngine:
         self._tasks.append(asyncio.create_task(self._on_bar_close(state, candle)))
 
     async def _on_bar_close(self, state: PlanState, candle: Candle) -> None:
+        if not await self._repair_if_lossy(state, candle):
+            return
         try:
             signal = state.strategy.latest_signal(list(state.series.bars))
         except Exception as exc:
@@ -460,6 +462,71 @@ class TradingEngine:
                  bar=signal.bar_ts.isoformat(), price=signal.price)
         self.notifier.signal(signal)
         await self.handle_signal(state, signal)
+
+    async def _repair_if_lossy(self, state: PlanState, candle: Candle) -> bool:
+        """Replace a bar built through a dropped connection with the exchange's.
+
+        A bar is aggregated from ticks. If the socket goes down mid-bar the
+        ticks simply do not arrive, and the bar still closes -- looking whole,
+        with a plausible close and a truncated high and low. ATR is computed
+        from that range, the UT stop from that ATR, and a crossing appears that
+        the exchange's own bars do not contain. On 18 August that produced four
+        phantom trades and cost Rs 14,090.
+
+        The feed-staleness guard cannot see this: it catches a feed delivering
+        *nothing*, not one delivering most of it.
+
+        Returns False to abandon the bar entirely, which is the fail-closed
+        answer when the authoritative version cannot be fetched.
+        """
+        if self.feed is None or not self.feed.dropped_since(candle.ts):
+            return True
+        log.warning("engine.bar_lossy", plan=state.name,
+                    bar=candle.ts.isoformat(),
+                    detail="feed dropped during this bar — refetching it from "
+                           "the exchange before signalling")
+        if self.client is None:
+            self.notifier.error(
+                "unverifiable bar",
+                f"{state.name}: the feed dropped during the "
+                f"{candle.ts:%H:%M} bar and there is no data client to check "
+                f"it against. Skipping the bar rather than trading it.")
+            return False
+        try:
+            end = candle.ts + dt.timedelta(minutes=state.timeframe.minutes or 0)
+            fresh = await asyncio.to_thread(
+                fetch_candles, self.client, state.instrument, state.timeframe,
+                candle.ts - dt.timedelta(minutes=(state.timeframe.minutes or 0) * 3),
+                end + dt.timedelta(minutes=1))
+        except Exception as exc:
+            log.error("engine.bar_refetch_failed", plan=state.name, error=str(exc)[:160])
+            self.notifier.error(
+                "could not verify a bar",
+                f"{state.name}: the feed dropped during the {candle.ts:%H:%M} "
+                f"bar and refetching it failed ({exc}). Skipping the bar.")
+            return False
+        authoritative = next((c for c in fresh if c.ts == candle.ts), None)
+        if authoritative is None:
+            log.warning("engine.bar_not_yet_published", plan=state.name,
+                        bar=candle.ts.isoformat(),
+                        detail="exchange has not published this bar yet; skipping")
+            return False
+        if (authoritative.high, authoritative.low, authoritative.close) != (
+                candle.high, candle.low, candle.close):
+            log.warning("engine.bar_repaired", plan=state.name,
+                        bar=candle.ts.isoformat(),
+                        was=f"H{candle.high:.2f} L{candle.low:.2f} C{candle.close:.2f}",
+                        now=f"H{authoritative.high:.2f} L{authoritative.low:.2f}"
+                            f" C{authoritative.close:.2f}")
+            self.notifier.send(
+                f"{state.name}: repaired the {candle.ts:%H:%M} bar from the "
+                f"exchange after a feed drop\n"
+                f"was  H {candle.high:,.2f} L {candle.low:,.2f} "
+                f"C {candle.close:,.2f}\n"
+                f"now  H {authoritative.high:,.2f} L {authoritative.low:,.2f} "
+                f"C {authoritative.close:,.2f}")
+            state.series.replace_last(authoritative)
+        return True
 
     # --- signal handling --------------------------------------------------
     async def handle_signal(self, state: PlanState, signal: Signal) -> None:
