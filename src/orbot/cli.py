@@ -318,15 +318,29 @@ def token(
 
 @app.command()
 def instruments(force: bool = typer.Option(False, "--force", "-f")) -> None:
-    """Download today's scrip master."""
+    """Download today's scrip master, for whichever broker is configured.
+
+    This used to fetch Dhan's file unconditionally, so on an Angel setup it
+    downloaded 34 MB, reported success, and left `doctor` still saying the
+    scrip master was missing -- the two commands disagreeing about which file
+    counts.
+    """
     settings = get_settings()
-    path = settings.scrip_master_path
+    path = _scrip_master_path(settings)
     if is_fresh(path) and not force:
         console.print(f"[green]already fresh[/green] {path} (use --force to re-download)")
         return
-    console.print("downloading scrip master (~34 MB)...")
-    download_scrip_master(path)
-    registry = InstrumentRegistry.load(path)
+    console.print(f"downloading the {settings.broker} scrip master...")
+    if settings.broker == "angel":
+        from .broker.angel.instruments import (
+            download_scrip_master as download_angel,
+            load_registry as load_angel,
+        )
+        download_angel(path)
+        registry = load_angel(path)
+    else:
+        download_scrip_master(path)
+        registry = InstrumentRegistry.load(path)
     console.print(f"[green]done[/green] {len(registry):,} instruments -> {path}")
 
 
