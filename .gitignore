@@ -20,3 +20,14 @@ HALT
 
 # Derived from the scrip master; rebuilt on demand.
 data/*.filtered.json
+
+# SSH keys. A private key in a public repo is full access to the server that
+# holds ANGEL_MPIN and ANGEL_TOTP_SECRET -- which together are full access to
+# a real trading account. Belt and braces: these should live in ~/.ssh, not
+# here, but if one lands in this directory git must never see it.
+*.key
+*.pem
+id_rsa*
+id_ed25519*
+*.ppk
+*.pub
