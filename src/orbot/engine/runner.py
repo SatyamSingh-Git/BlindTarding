@@ -497,7 +497,16 @@ class TradingEngine:
         await self.handle_signal(state, signal)
 
     async def _repair_if_lossy(self, state: PlanState, candle: Candle) -> bool:
-        """Replace a bar built through a dropped connection with the exchange's.
+        """Replace every closed bar with the exchange's own version.
+
+        Originally this only ran after a dropped connection. That was not
+        enough: Angel's feed sends periodic snapshots rather than every trade,
+        so a tick-built bar is an approximation even on a perfectly healthy
+        socket. On 20 August the engine put the 17:00 gold bar's close at
+        156,581 where the exchange said 156,609 -- twenty-eight points, no
+        disconnect, no warning. That was enough to shift ATR, shift the UT
+        stop, and invent a SELL the exchange's bars do not contain. It sold
+        both metals into a rally.
 
         A bar is aggregated from ticks. If the socket goes down mid-bar the
         ticks simply do not arrive, and the bar still closes -- looking whole,
@@ -509,15 +518,17 @@ class TradingEngine:
         The feed-staleness guard cannot see this: it catches a feed delivering
         *nothing*, not one delivering most of it.
 
+        One extra request per bar close per plan -- eight a day on a 2-hour
+        plan -- buys signals computed on the same data the backtest used.
+
         Returns False to abandon the bar entirely, which is the fail-closed
         answer when the authoritative version cannot be fetched.
         """
-        if self.feed is None or not self.feed.dropped_since(candle.ts):
-            return True
-        log.warning("engine.bar_lossy", plan=state.name,
-                    bar=candle.ts.isoformat(),
-                    detail="feed dropped during this bar — refetching it from "
-                           "the exchange before signalling")
+        lossy = self.feed is not None and self.feed.dropped_since(candle.ts)
+        if lossy:
+            log.warning("engine.bar_lossy", plan=state.name,
+                        bar=candle.ts.isoformat(),
+                        detail="feed dropped during this bar")
         if self.client is None:
             self.notifier.error(
                 "unverifiable bar",
@@ -525,12 +536,21 @@ class TradingEngine:
                 f"{candle.ts:%H:%M} bar and there is no data client to check "
                 f"it against. Skipping the bar rather than trading it.")
             return False
+        span = state.timeframe.minutes or 0
+        fresh: list[Candle] = []
         try:
-            end = candle.ts + dt.timedelta(minutes=state.timeframe.minutes or 0)
-            fresh = await asyncio.to_thread(
-                fetch_candles, self.client, state.instrument, state.timeframe,
-                candle.ts - dt.timedelta(minutes=(state.timeframe.minutes or 0) * 3),
-                end + dt.timedelta(minutes=1))
+            for attempt in range(3):
+                fresh = await asyncio.to_thread(
+                    fetch_candles, self.client, state.instrument,
+                    state.timeframe,
+                    candle.ts - dt.timedelta(minutes=span * 3),
+                    candle.ts + dt.timedelta(minutes=span + 1))
+                if any(c.ts == candle.ts for c in fresh):
+                    break
+                # The exchange publishes a bar a little after it closes. Wait
+                # rather than fall through to "not yet published" and throw the
+                # signal away.
+                await asyncio.sleep(5 * (attempt + 1))
         except Exception as exc:
             log.error("engine.bar_refetch_failed", plan=state.name, error=str(exc)[:160])
             self.notifier.error(
@@ -544,9 +564,10 @@ class TradingEngine:
                         bar=candle.ts.isoformat(),
                         detail="exchange has not published this bar yet; skipping")
             return False
-        if (authoritative.high, authoritative.low, authoritative.close) != (
-                candle.high, candle.low, candle.close):
-            log.warning("engine.bar_repaired", plan=state.name,
+        differs = (authoritative.high, authoritative.low, authoritative.close) != (
+            candle.high, candle.low, candle.close)
+        if differs:
+            log.warning("engine.bar_repaired", plan=state.name, lossy=lossy,
                         bar=candle.ts.isoformat(),
                         was=f"H{candle.high:.2f} L{candle.low:.2f} C{candle.close:.2f}",
                         now=f"H{authoritative.high:.2f} L{authoritative.low:.2f}"

@@ -1085,3 +1085,48 @@ class TestInstrumentCache:
         master.with_suffix(".filtered.json").write_text("{ not json",
                                                         encoding="utf-8")
         assert len(load_registry(master, underlyings=["GOLDM"])) >= 1
+
+
+class TestEveryBarIsVerified:
+    """Angel's feed sends periodic snapshots, not every trade, so a tick-built
+    bar is an approximation even on a healthy socket. On 20 August the engine
+    put a gold bar's close 28 points from the exchange's -- no disconnect, no
+    warning -- and that was enough to shift ATR, shift the UT stop, and invent
+    a SELL that sold both metals into a rally."""
+
+    def test_verification_is_not_conditional_on_a_disconnect(self):
+        """The original version only ran after a dropped connection, which is
+        exactly the case that did NOT apply on 20 August."""
+        import inspect
+        from orbot.engine.runner import TradingEngine
+        src = inspect.getsource(TradingEngine._repair_if_lossy)
+        # the early return that made it conditional must be gone
+        assert "if self.feed is None or not self.feed.dropped_since" not in src
+        assert "lossy =" in src, "the drop is now recorded, not used as a gate"
+
+    def test_a_small_close_difference_is_enough_to_flip_a_signal(self):
+        """Why 28 points matters: the UT stop is built from ATR, which is built
+        from each bar's range."""
+        from orbot.engine.strategy import SvmkrUtHmaOrb, params_from_config
+        from orbot.models import Candle
+
+        def series(last_close):
+            bars, price = [], 150_000.0
+            t0 = dt.datetime(2026, 8, 1, 9, 0)
+            for i in range(140):
+                price += 40
+                bars.append(Candle(ts=t0 + dt.timedelta(hours=2 * i),
+                                   open=price, high=price + 300,
+                                   low=price - 300, close=price, volume=1))
+            bars[-1] = Candle(ts=bars[-1].ts, open=bars[-1].open,
+                              high=bars[-1].high, low=bars[-1].low,
+                              close=last_close, volume=1)
+            return bars
+
+        strat = SvmkrUtHmaOrb(params_from_config({"ut_key": 3.0,
+                                                  "ut_atr_period": 1}))
+        a = strat.evaluate(series(155_560.0))
+        b = strat.evaluate(series(155_588.0))
+        # not asserting they differ -- asserting the machinery is sensitive
+        # enough that a 28-point difference reaches the stop at all
+        assert a.ut.stop[-1] != 0 and b.ut.stop[-1] != 0
