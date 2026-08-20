@@ -465,6 +465,32 @@ def update_plan(plan_name: str, changes: dict[str, Any], *,
     return result
 
 
+def configured_params(plan_name: str) -> dict[str, Any]:
+    """The parameters a plan is actually running, for the playground to show.
+
+    Reads the plan rather than the YAML defaults, so a plan that overrides the
+    shared `&svmkr_params` anchor shows its own values. Falls back to the
+    chart-legend defaults for anything a plan leaves unset, which is what the
+    strategy itself does.
+    """
+    plan = next((p for p in load_plans() if p.name == plan_name), None)
+    if plan is None:
+        return {"error": f"no plan named {plan_name!r}"}
+    from ..engine.strategy import params_from_config
+
+    params = params_from_config(plan.strategy.params)
+    return {
+        "plan": plan.name,
+        "ut_key": params.ut_key,
+        "ut_atr_period": params.ut_atr_period,
+        "hma_length": params.hma_length,
+        "orb_minutes": params.orb_minutes,
+        "orb_session": params.orb_session,
+        "use_heikin_ashi": params.use_heikin_ashi,
+        "timeframe": plan.signal.timeframe,
+    }
+
+
 def apply_params(changes: dict[str, Any], *, dry_run: bool = True) -> dict[str, Any]:
     """Edit strategy parameters.
 
