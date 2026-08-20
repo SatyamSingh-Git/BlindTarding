@@ -1,0 +1,42 @@
+[Unit]
+Description=ORBot trading engine
+Documentation=https://github.com/SatyamSingh-Git/BlindTarding
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@APP_DIR@
+ExecStart=@APP_DIR@/.venv/bin/orbot run --mode paper
+
+# The whole point of moving to a server. This bot died four times in three
+# days because it was tied to a shell session, and was down 24 of 60 hours.
+Restart=always
+RestartSec=10
+
+# A crash loop should be loud, not silent: if it fails five times in five
+# minutes, stop and leave the failure visible rather than hammering Angel.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Give it a moment to flatten and close the journal cleanly on stop.
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=orbot
+
+# It needs nothing outside its own directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@APP_DIR@/data
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
