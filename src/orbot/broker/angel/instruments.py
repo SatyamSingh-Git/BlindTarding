@@ -184,6 +184,38 @@ def parse_row(row: dict) -> Instrument | None:
     )
 
 
+def _cache_path(path: Path) -> Path:
+    return path.with_suffix(".filtered.json")
+
+
+def _load_cache(path: Path, key: str) -> list[dict] | None:
+    """Rows kept from a previous parse, if they still apply.
+
+    The full scrip master is ~36 MB of JSON that expands to ~180 MB of Python
+    objects, of which this bot keeps about 13%. On a 1 GB machine that peak is
+    the difference between running and being killed by the OOM reaper.
+    """
+    cache = _cache_path(path)
+    if not cache.exists() or cache.stat().st_mtime < path.stat().st_mtime:
+        return None
+    try:
+        blob = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(blob, dict) or blob.get("key") != key:
+        return None          # a different filter — the cache does not apply
+    rows = blob.get("rows")
+    return rows if isinstance(rows, list) else None
+
+
+def _write_cache(path: Path, key: str, rows: list[dict]) -> None:
+    try:
+        _cache_path(path).write_text(
+            json.dumps({"key": key, "rows": rows}), encoding="utf-8")
+    except OSError as exc:
+        log.warning("angel.cache_unwritable", error=str(exc)[:120])
+
+
 def iter_instruments(path: Path) -> Iterator[Instrument]:
     raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     if not isinstance(raw, list):
@@ -194,6 +226,19 @@ def iter_instruments(path: Path) -> Iterator[Instrument]:
         instrument = parse_row(row)
         if instrument is not None:
             yield instrument
+
+
+def _iter_with_rows(path: Path) -> Iterator[tuple[Instrument, dict]]:
+    """Parsed instruments alongside the raw rows, so survivors can be cached."""
+    raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    if not isinstance(raw, list):
+        raise ValueError(f"{path} is not an Angel scrip master (expected a JSON list)")
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        instrument = parse_row(row)
+        if instrument is not None:
+            yield instrument, row
 
 
 def load_registry(
@@ -213,8 +258,19 @@ def load_registry(
     seg_filter = set(segments) if segments else None
     und_filter = {u.upper() for u in underlyings} if underlyings else None
 
+    key = json.dumps({"segments": sorted(s.value for s in seg_filter) if seg_filter
+                      else None,
+                      "underlyings": sorted(und_filter) if und_filter else None},
+                     sort_keys=True)
+    cached = _load_cache(path, key)
+    if cached is not None:
+        kept = [i for i in (parse_row(r) for r in cached) if i is not None]
+        log.info("angel.instruments_from_cache", count=len(kept))
+        return InstrumentRegistry(kept)
+
+    raw_kept: list[dict] = []
     kept: list[Instrument] = []
-    for instrument in iter_instruments(path):
+    for instrument, row in _iter_with_rows(path):
         if seg_filter and instrument.segment not in seg_filter:
             continue
         if und_filter and instrument.instrument_type in (OPTION_TYPES | FUTURE_TYPES):
@@ -222,7 +278,9 @@ def load_registry(
             if und not in und_filter:
                 continue
         kept.append(instrument)
-    log.info("angel.instruments_loaded", count=len(kept))
+        raw_kept.append(row)
+    _write_cache(path, key, raw_kept)
+    log.info("angel.instruments_loaded", count=len(kept), cached=len(raw_kept))
     return InstrumentRegistry(kept)
 
 

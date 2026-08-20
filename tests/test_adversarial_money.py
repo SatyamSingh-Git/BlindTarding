@@ -1029,3 +1029,59 @@ class TestContractRolling:
         eng.registry.select_expiry.side_effect = RuntimeError("no expiries")
         got = TradingEngine._resolve_signal_instrument(eng, plan)
         assert got.security_id == "563946"
+
+
+class TestInstrumentCache:
+    """The full scrip master is 36 MB of JSON that expands to ~180 MB of Python
+    objects, of which this bot keeps 13%. On a 1 GB machine that peak is the
+    difference between running and being killed by the OOM reaper."""
+
+    @staticmethod
+    def _master(tmp_path):
+        import json
+        rows = []
+        for name, tok in (("GOLDM", "1"), ("SILVER100", "2"), ("NIFTY", "3")):
+            rows.append({"token": tok, "symbol": f"{name}FUT", "name": name,
+                         "expiry": "04SEP2026", "strike": "0", "lotsize": "100",
+                         "instrumenttype": "FUTCOM", "exch_seg": "MCX",
+                         "tick_size": "100.000000"})
+        p = tmp_path / "master.json"
+        p.write_text(json.dumps(rows), encoding="utf-8")
+        return p
+
+    def test_a_cache_is_written_and_reused(self, tmp_path):
+        from orbot.broker.angel.instruments import load_registry
+        master = self._master(tmp_path)
+        first = load_registry(master, underlyings=["GOLDM"])
+        cache = master.with_suffix(".filtered.json")
+        assert cache.exists()
+        second = load_registry(master, underlyings=["GOLDM"])
+        assert len(second) == len(first)
+
+    def test_a_different_filter_does_not_reuse_the_cache(self, tmp_path):
+        """Caching the wrong instrument set would silently trade the wrong
+        contract, which is far worse than a slow start."""
+        from orbot.broker.angel.instruments import load_registry
+        master = self._master(tmp_path)
+        load_registry(master, underlyings=["GOLDM"])
+        both = load_registry(master, underlyings=["GOLDM", "SILVER100"])
+        assert len(both) >= 2
+
+    def test_a_stale_cache_is_ignored(self, tmp_path):
+        """A refreshed scrip master must win over yesterday's cache."""
+        import os, time
+        from orbot.broker.angel.instruments import load_registry
+        master = self._master(tmp_path)
+        load_registry(master, underlyings=["GOLDM"])
+        cache = master.with_suffix(".filtered.json")
+        old = cache.stat().st_mtime - 3600
+        os.utime(cache, (old, old))          # cache older than the source
+        assert load_registry(master, underlyings=["GOLDM"]) is not None
+
+    def test_a_corrupt_cache_falls_back_to_the_source(self, tmp_path):
+        from orbot.broker.angel.instruments import load_registry
+        master = self._master(tmp_path)
+        load_registry(master, underlyings=["GOLDM"])
+        master.with_suffix(".filtered.json").write_text("{ not json",
+                                                        encoding="utf-8")
+        assert len(load_registry(master, underlyings=["GOLDM"])) >= 1

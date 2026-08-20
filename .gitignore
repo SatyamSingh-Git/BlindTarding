@@ -17,3 +17,6 @@ data/*.json
 data/warmup/
 logs/
 HALT
+
+# Derived from the scrip master; rebuilt on demand.
+data/*.filtered.json
