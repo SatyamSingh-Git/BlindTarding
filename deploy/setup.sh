@@ -71,9 +71,8 @@ Setup complete.
        sudo systemctl start orbot
        journalctl -u orbot -f
 
-  4. The dashboard stays off the internet. Tunnel to it instead:
+  4. The dashboard runs as its own service, bound to localhost. Tunnel in:
        ssh -i orbot.key -L 8777:localhost:8777 ubuntu@<ip>
-       ./.venv/bin/orbot dashboard      # in that session
        # then open http://localhost:8777 on your own machine
 
 DONE

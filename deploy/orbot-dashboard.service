@@ -1,0 +1,36 @@
+[Unit]
+Description=ORBot dashboard (localhost only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@APP_DIR@
+# Binds 127.0.0.1 and nothing else. This page carries open positions and a
+# kill switch; it is reached by SSH tunnel, never from the internet.
+ExecStart=@APP_DIR@/.venv/bin/orbot dashboard --host 127.0.0.1 --port 8777
+
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Second in line behind the engine if memory ever gets tight: losing the
+# dashboard costs a page refresh, losing the engine costs a trade.
+OOMScoreAdjust=500
+MemoryMax=400M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=orbot-dash
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@APP_DIR@/data
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
