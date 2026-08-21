@@ -56,6 +56,20 @@ def _journal(path: Path) -> sqlite3.Connection | None:
 DEFAULT_CHART_BARS = 400
 
 
+def _plan_underlyings() -> list[str] | None:
+    """Underlyings the enabled plans need, for the instrument filter.
+
+    Calling build_broker() without this parses all 155,535 rows of the scrip
+    master -- 180 MB and eleven seconds -- because the filtered cache is keyed
+    on the filter, and "no filter" is a different key from the one the engine
+    warmed. On a 1 GB instance that allocation goes straight into swap, and it
+    happened on every dashboard poll: the chart endpoint simply never returned.
+    """
+    names = {p.execution.underlying for p in load_plans()
+             if p.enabled and p.execution.underlying}
+    return sorted(names) or None
+
+
 def _plans_segment(plans) -> object | None:
     """The exchange the enabled plans trade, when they agree on one.
 
@@ -246,7 +260,8 @@ def chart_payload(plan_name: str, bars: int = DEFAULT_CHART_BARS,
     if plan is None:
         return {"error": f"no plan named {plan_name!r}"}
 
-    bundle = build_broker(settings, refresh_instruments=False)
+    bundle = build_broker(settings, refresh_instruments=False,
+                           underlyings=_plan_underlyings())
     inst = bundle.registry.get(plan.signal.exchange_segment, plan.signal.security_id)
     overrides = dict(overrides or {})
     tf_spec = overrides.pop("timeframe", None)
@@ -382,7 +397,8 @@ def search_instruments(query: str, limit: int = 25) -> list[dict[str, Any]]:
     if len(q) < 2:
         return []
     settings = get_settings()
-    registry = build_broker(settings, refresh_instruments=False).registry
+    registry = build_broker(settings, refresh_instruments=False,
+                           underlyings=_plan_underlyings()).registry
     wanted = {InstrumentType.INDEX, InstrumentType.EQUITY,
               InstrumentType.FUTIDX, InstrumentType.FUTSTK}
 
@@ -666,7 +682,8 @@ def create_app(*, allow_control: bool = True):
         settings = get_settings()
         journal = Journal(settings.journal_path)
         try:
-            bundle = build_broker(settings, refresh_instruments=False)
+            bundle = build_broker(settings, refresh_instruments=False,
+                           underlyings=_plan_underlyings())
             oms = build_oms(settings.trade_mode, bundle.client,
                             state_path=settings.paper_state_path)
             positions = oms.positions()

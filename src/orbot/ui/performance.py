@@ -322,7 +322,9 @@ def performance_payload(plan_name: str, *, bars: int = 400,
     if plan is None:
         return {"error": f"no plan named {plan_name!r}"}
 
-    bundle = build_broker(settings, refresh_instruments=False)
+    from .server import _plan_underlyings
+    bundle = build_broker(settings, refresh_instruments=False,
+                          underlyings=_plan_underlyings())
     inst = bundle.registry.get(plan.signal.exchange_segment, plan.signal.security_id)
     tf = plan.signal.tf
     params = params_from_config(plan.strategy.params)
