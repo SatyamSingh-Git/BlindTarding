@@ -46,6 +46,11 @@ def row(exch, seg, secid, instr, und, symbol, display, lot, expiry, strike, opt,
 
 @pytest.fixture
 def registry(tmp_path: Path) -> InstrumentRegistry:
+    # Expiries are relative to today, never hardcoded. A fixed date is a time
+    # bomb: these were 2026-08-20, and the suite went red on the 21st because
+    # the contracts had expired -- a failure that says nothing about the code.
+    weekly = (dt.date.today() + dt.timedelta(days=6)).isoformat()
+    monthly = (dt.date.today() + dt.timedelta(days=13)).isoformat()
     lines = [
         HEADER,
         row("NSE", "I", "13", "INDEX", "NIFTY", "NIFTY", "Nifty 50", "1",
@@ -53,13 +58,13 @@ def registry(tmp_path: Path) -> InstrumentRegistry:
         row("NSE", "E", "2885", "EQUITY", "RELIANCE", "RELIANCE", "RELIANCE",
             "1", "0001-01-01", "-0.01", "XX", series="EQ", freeze="0"),
         row("NSE", "D", "70001", "FUTIDX", "NIFTY", "NIFTY", "NIFTY AUG FUT",
-            "65", "2026-08-27", "-0.01", "XX"),
+            "65", monthly, "-0.01", "XX"),
     ]
     secid = 80000
     for strike in range(24_000, 25_001, 100):
         for opt in ("CE", "PE"):
             lines.append(row("NSE", "D", str(secid), "OPTIDX", "NIFTY", "NIFTY",
-                             f"NIFTY 20 AUG {strike} {opt}", "65", "2026-08-20",
+                             f"NIFTY {strike} {opt}", "65", weekly,
                              f"{strike}.00000", opt, tick="5.0"))
             secid += 1
     path = tmp_path / "s.csv"
