@@ -47,6 +47,15 @@ def _journal(path: Path) -> sqlite3.Connection | None:
 
 
 
+# 1500 two-hour bars is roughly 480 days, so the dashboard was fetching about
+# 8,000 hourly candles and resampling them on every poll -- per plan, every 30
+# seconds. On a 1 GB instance that filled memory, pushed 1.7 GB into swap and
+# left the box thrashing, which is why the chart showed "no data": its own
+# requests were timing out. 400 bars is ~50 trading days at 2h, which is more
+# chart than anyone reads, and the strategy needs only 114 to warm up.
+DEFAULT_CHART_BARS = 400
+
+
 def _plans_segment(plans) -> object | None:
     """The exchange the enabled plans trade, when they agree on one.
 
@@ -215,7 +224,7 @@ def health() -> dict[str, Any]:
     return out
 
 
-def chart_payload(plan_name: str, bars: int = 1500,
+def chart_payload(plan_name: str, bars: int = DEFAULT_CHART_BARS,
                   overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     """Candles plus the indicator overlays, so the chart shows exactly what the
     engine sees — the point being that you can put it beside TradingView.
@@ -584,7 +593,7 @@ def create_app(*, allow_control: bool = True):
         return build_state()
 
     @app.get("/api/chart/{plan_name}")
-    def chart(plan_name: str, bars: int = 1500, ut_key: float | None = None,
+    def chart(plan_name: str, bars: int = DEFAULT_CHART_BARS, ut_key: float | None = None,
               ut_atr_period: int | None = None, hma_length: int | None = None,
               orb_session: str | None = None, timeframe: str | None = None,
               use_heikin_ashi: bool | None = None) -> dict:
@@ -622,7 +631,7 @@ def create_app(*, allow_control: bool = True):
         return health()
 
     @app.get("/api/performance/{plan_name}")
-    def performance(plan_name: str, bars: int = 1500,
+    def performance(plan_name: str, bars: int = DEFAULT_CHART_BARS,
                     model_options: bool = False, period: str = "all",
                     direction: str = "long") -> dict:
         from .performance import performance_payload

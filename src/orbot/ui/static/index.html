@@ -476,7 +476,7 @@ async function refresh(){
 async function loadChart(withOverrides){
   if(!currentPlan) return;
   $("#chartNote").textContent = "loading…";
-  let qs = "bars=1500";
+  let qs = "bars=400";
   const dirty = withOverrides ? pgDirty() : {};
   for(const [k,v] of Object.entries(dirty)) qs += `&${k}=${encodeURIComponent(v)}`;
   try{
@@ -644,7 +644,7 @@ async function loadPerf(modelOptions){
     const q = modelOptions ? "&model_options=true" : "";
     const period = $("#perfPeriod").value, dir = $("#perfDir").value;
     perf = await (await fetch(`/api/performance/${currentPlan}` +
-      `?bars=1500&period=${period}&direction=${dir}${q}`)).json();
+      `?bars=400&period=${period}&direction=${dir}${q}`)).json();
   }catch(e){ $("#perfNote").textContent = "unavailable"; return; }
   if(perf.error){ $("#perfNote").textContent = perf.error; return; }
   renderPerf();

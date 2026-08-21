@@ -308,7 +308,7 @@ def _period_start(period: str, timestamps: list[dt.datetime]) -> dt.datetime | N
     return next(t for t in timestamps if t.date() == cutoff)
 
 
-def performance_payload(plan_name: str, *, bars: int = 1500,
+def performance_payload(plan_name: str, *, bars: int = 400,
                         model_options: bool = False,
                         period: str = "all",
                         direction: str = "long") -> dict[str, Any]:
