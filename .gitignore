@@ -11,6 +11,9 @@ venv/
 data/*.csv
 data/*.db
 data/*.db-journal
+data/*.db.*
+data/*.sqlite
+data/*.sqlite-*
 data/.token.json
 data/.angel_session.json
 data/*.json
